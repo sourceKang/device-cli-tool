@@ -1,0 +1,20 @@
+version: 1
+
+targets:
+  lab-ies:
+    transport: serial
+    serial_port: COM5
+    baudrate: 115200
+    timeout: 15
+    username: admin
+    password_env: CLI_TOOL_SERIAL_PASSWORD
+    catalog: builtin:ies52xx
+    default_command: show_version
+
+  lab-neox:
+    transport: ssh
+    host: 192.0.2.10
+    username: admin
+    password_env: CLI_TOOL_SSH_PASSWORD
+    catalog: builtin:neox
+    default_command: show_version

@@ -1,0 +1,31 @@
+.venv/
+.pytest_cache/
+.pytest-tmp/
+__pycache__/
+*.py[cod]
+reports/
+build/
+dist/
+*.egg-info/
+.package-test/
+
+# Local agent and workspace instructions
+/.agents/
+/.codex/
+/AGENTS.md
+
+# Internal research, lab evidence, and unpublished User Guide notes
+/docs/cli_tool_plan.md
+/docs/cli_tool_readonly_candidates.md
+/docs/cli_tool_smoke_results.md
+/docs/cli_tool_ug_notes.md
+*.pdf
+
+# Project-local targets and credentials must never be published
+.env
+.env.*
+**/auth_accounts.yaml
+**/test_targets.yaml
+**/device_cli_targets.yaml
+*.local.yaml
+*.local.yml

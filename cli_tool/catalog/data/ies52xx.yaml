@@ -1,0 +1,13 @@
+family: ies52xx
+model: generic
+commands:
+  show_version:
+    mode: exec
+    command: "show version"
+    readonly: true
+    expected_tokens: []
+  show_system_information:
+    mode: exec
+    command: "show system-information"
+    readonly: true
+    expected_tokens: []

@@ -1,0 +1,9 @@
+family: generic
+model: generic
+commands:
+  show_version:
+    mode: exec
+    command: "show version"
+    readonly: true
+    expected_tokens: []
+
