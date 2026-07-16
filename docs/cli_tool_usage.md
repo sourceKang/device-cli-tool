@@ -10,6 +10,7 @@
 - 透過 `DeviceDriver` 依 family/model 管理設備差異。
 - 透過 `CliTransport` 介面抽象命令執行方式。
 - 透過 `SshCliTransport` 包裝本專案既有 SSH session pool。
+- SSH connect/auth 前置階段遇到暫時性錯誤時可重試，預設最多 3 次並採指數退避；認證錯誤不重試。
 - 透過 `SerialCliTransport` 使用 serial console，例如 `COM5`。
 - 針對 UG 常見 `-- more --` pager prompt 送出 continue，避免長輸出被第一頁截斷。
 - 透過 fake transport 進行離線單元測試。
@@ -70,7 +71,7 @@ YAML catalog -> DeviceDriver -> Transport -> Read-only VerifyResult -> JSON repo
 
 Catalog 應放在 `configs/cli_tool/`，不得放設備 IP、帳號、密碼、token 或任何 lab-specific secret。
 
-新增命令前可先參考 `docs/cli_tool_ug_notes.md` 與 `docs/cli_tool_readonly_candidates.md`；這些文件只代表 UG / 既有資料中的候選資訊，不等同於已完成實機驗證。
+新增命令前需以公開設備文件或已去識別化的實機 output 確認語法、read-only 性質與輸出安全性；候選資訊不等同於已完成實機驗證。
 
 最小格式：
 
@@ -178,6 +179,8 @@ nodes:
 | `baudrate` | Serial baudrate | `115200` |
 | `timeout` | SSH/Serial 共用 timeout | `15` |
 | `ssh_timeout` | SSH timeout；優先於 `timeout` | `15` |
+| `ssh_connect_attempts` | SSH connection 最大嘗試次數 | `3` |
+| `ssh_retry_backoff_seconds` | 初始 retry 等待秒數，每次失敗加倍 | `1` |
 | `serial_timeout` | Serial timeout；優先於 `timeout` | `15` |
 | `report_dir` | redacted JSON report 目錄 | `reports/cli-tool` |
 
@@ -233,6 +236,7 @@ $env:CLI_TOOL_SERIAL_PASSWORD="your-password"
 - 使用 wheel 內建的 `builtin:generic`。
 - 執行 `show_version`。
 - 每次 invocation 只連線一台設備；SSH smoke transport 只使用一個 SSH session，serial transport 只開一個 serial connection。
+- SSH 僅在 command 尚未送出前重試暫時性連線錯誤；Authentication failure 與 command 執行錯誤不重試。
 - 使用 `--env-node` 時，從被使用專案的 `node_target.cli` 讀取 SSH/Serial 設定；未設定 `cli` 時維持 SSH、device IP 與 readwrite 帳密的既有行為。
 - 只允許 catalog 內 `readonly: true` 的 command。
 - 寫出 redacted JSON report 到 `reports/cli-tool/`。
@@ -261,6 +265,8 @@ $env:CLI_TOOL_SERIAL_PASSWORD="your-password"
 --host 192.0.2.10
 --username admin
 --password-env CLI_TOOL_SERIAL_PASSWORD
+--ssh-connect-attempts 3
+--ssh-retry-backoff-seconds 1
 --serial-port COM5
 --baudrate 115200
 --serial-timeout 15

@@ -36,6 +36,7 @@ class SshTiming:
     reused_session: bool
     token_path: str
     wait_seconds: float
+    connect_attempts: int = 0
     connect_seconds: float = 0.0
     banner_read_seconds: float = 0.0
     command_seconds: list[dict[str, float | str | bool]] = field(default_factory=list)
@@ -52,6 +53,7 @@ class SshTiming:
             "reused_session": self.reused_session,
             "token_path": self.token_path,
             "wait_seconds": round(self.wait_seconds, 3),
+            "connect_attempts": self.connect_attempts,
             "connect_seconds": round(self.connect_seconds, 3),
             "banner_read_seconds": round(self.banner_read_seconds, 3),
             "command_seconds": [
@@ -69,14 +71,32 @@ class SshTiming:
 
 
 class SshCliClient:
-    def __init__(self, host: str, username: str, password: str, *, timeout: float = 15) -> None:
+    def __init__(
+        self,
+        host: str,
+        username: str,
+        password: str,
+        *,
+        timeout: float = 15,
+        connect_attempts: int = 3,
+        retry_backoff_seconds: float = 1.0,
+    ) -> None:
         self.host = host
         self.username = username
         self.password = password
         self.timeout = timeout
+        self.connect_attempts = connect_attempts
+        self.retry_backoff_seconds = retry_backoff_seconds
 
     def run_commands(self, commands: list[str]) -> list[CliCommandResult]:
-        session = SshCliSession(self.host, self.username, self.password, timeout=self.timeout)
+        session = SshCliSession(
+            self.host,
+            self.username,
+            self.password,
+            timeout=self.timeout,
+            connect_attempts=self.connect_attempts,
+            retry_backoff_seconds=self.retry_backoff_seconds,
+        )
         try:
             session.connect()
             return session.run_commands(commands)
@@ -119,11 +139,27 @@ class SshCliClient:
 
 
 class SshCliSession:
-    def __init__(self, host: str, username: str, password: str, *, timeout: float = 15) -> None:
+    def __init__(
+        self,
+        host: str,
+        username: str,
+        password: str,
+        *,
+        timeout: float = 15,
+        connect_attempts: int = 3,
+        retry_backoff_seconds: float = 1.0,
+    ) -> None:
+        if connect_attempts < 1:
+            raise ValueError("connect_attempts must be at least 1")
+        if retry_backoff_seconds < 0:
+            raise ValueError("retry_backoff_seconds must be at least 0")
         self.host = host
         self.username = username
         self.password = password
         self.timeout = timeout
+        self.connect_attempts = connect_attempts
+        self.retry_backoff_seconds = retry_backoff_seconds
+        self.connect_attempts_used = 0
         self.client = None
         self.channel = None
         self.connect_seconds = 0.0
@@ -138,25 +174,40 @@ class SshCliSession:
         except ImportError as error:
             raise RuntimeError("paramiko is required for SSH CLI verification") from error
 
-        self.client = paramiko.SSHClient()
-        self.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        started = time.monotonic()
-        self.client.connect(
-            hostname=self.host,
-            username=self.username,
-            password=self.password,
-            look_for_keys=False,
-            allow_agent=False,
-            timeout=self.timeout,
-            banner_timeout=self.timeout,
-            auth_timeout=self.timeout,
-        )
-        self.connect_seconds += time.monotonic() - started
-        self.channel = self.client.invoke_shell(width=200, height=120)
-        self.channel.settimeout(3)
-        started = time.monotonic()
-        SshCliClient._read_available(self.channel)
-        self.banner_read_seconds += time.monotonic() - started
+        for attempt in range(1, self.connect_attempts + 1):
+            self.connect_attempts_used = attempt
+            self.client = paramiko.SSHClient()
+            self.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            try:
+                started = time.monotonic()
+                try:
+                    self.client.connect(
+                        hostname=self.host,
+                        username=self.username,
+                        password=self.password,
+                        look_for_keys=False,
+                        allow_agent=False,
+                        timeout=self.timeout,
+                        banner_timeout=self.timeout,
+                        auth_timeout=self.timeout,
+                    )
+                finally:
+                    self.connect_seconds += time.monotonic() - started
+                self.channel = self.client.invoke_shell(width=200, height=120)
+                self.channel.settimeout(3)
+                started = time.monotonic()
+                SshCliClient._read_available(self.channel)
+                self.banner_read_seconds += time.monotonic() - started
+                return
+            except Exception as error:
+                try:
+                    self.close(logout=False)
+                except Exception:
+                    self.client = None
+                    self.channel = None
+                if attempt >= self.connect_attempts or not _is_retryable_connect_error(error, paramiko):
+                    raise
+                time.sleep(self.retry_backoff_seconds * (2 ** (attempt - 1)))
 
     def is_healthy(self) -> bool:
         if self.client is None or self.channel is None:
@@ -320,15 +371,23 @@ class SshSessionPool:
         max_sessions: int = 2,
         acquire_timeout_seconds: float = 60,
         ssh_timeout: float = 15,
+        connect_attempts: int = 3,
+        retry_backoff_seconds: float = 1.0,
         token_directory: Path | None = None,
         reuse_sessions: bool = True,
     ) -> None:
+        if connect_attempts < 1:
+            raise ValueError("connect_attempts must be at least 1")
+        if retry_backoff_seconds < 0:
+            raise ValueError("retry_backoff_seconds must be at least 0")
         self.node_key = node_key.lower()
         self.host = host
         self.username = username
         self.password = password
         self.max_sessions = max_sessions
         self.ssh_timeout = ssh_timeout
+        self.connect_attempts = connect_attempts
+        self.retry_backoff_seconds = retry_backoff_seconds
         self.reuse_sessions = reuse_sessions
         self.token_directory = token_directory or default_token_directory()
         self.semaphore = FileTokenSemaphore(
@@ -374,7 +433,14 @@ class SshSessionPool:
                 self.semaphore.release(token_path)
 
         token_path, wait_seconds = self.semaphore.acquire(owner)
-        session = SshCliSession(self.host, self.username, self.password, timeout=self.ssh_timeout)
+        session = SshCliSession(
+            self.host,
+            self.username,
+            self.password,
+            timeout=self.ssh_timeout,
+            connect_attempts=self.connect_attempts,
+            retry_backoff_seconds=self.retry_backoff_seconds,
+        )
         timing = SshTiming(
             node_key=self.node_key,
             host=self.host,
@@ -386,6 +452,7 @@ class SshSessionPool:
         )
         try:
             session.connect()
+            timing.connect_attempts = session.connect_attempts_used
             timing.connect_seconds = session.connect_seconds
             timing.banner_read_seconds = session.banner_read_seconds
         except Exception:
@@ -416,7 +483,7 @@ class SshSessionPool:
             self.semaphore.release(token_path)
 
 
-_POOLS: dict[tuple[str, str, str, int, bool], SshSessionPool] = {}
+_POOLS: dict[tuple[str, str, str, int, bool, float, int, float], SshSessionPool] = {}
 _POOLS_LOCK = threading.Lock()
 
 
@@ -429,11 +496,22 @@ def ssh_session_pool(
     max_sessions: int | None = None,
     acquire_timeout_seconds: float | None = None,
     ssh_timeout: float = 15,
+    connect_attempts: int = 3,
+    retry_backoff_seconds: float = 1.0,
     reuse_sessions: bool | None = None,
 ) -> SshSessionPool:
     resolved_max_sessions = max_sessions or int(os.environ.get("NEOX_SSH_POOL_SIZE", "2"))
     resolved_reuse_sessions = reuse_sessions if reuse_sessions is not None else env_bool("NEOX_SSH_POOL_REUSE", True)
-    pool_key = (node_key.lower(), host, username, resolved_max_sessions, resolved_reuse_sessions)
+    pool_key = (
+        node_key.lower(),
+        host,
+        username,
+        resolved_max_sessions,
+        resolved_reuse_sessions,
+        ssh_timeout,
+        connect_attempts,
+        retry_backoff_seconds,
+    )
     with _POOLS_LOCK:
         pool = _POOLS.get(pool_key)
         if pool is None:
@@ -446,10 +524,32 @@ def ssh_session_pool(
                 acquire_timeout_seconds=acquire_timeout_seconds
                 or float(os.environ.get("NEOX_SSH_POOL_ACQUIRE_TIMEOUT", "60")),
                 ssh_timeout=ssh_timeout,
+                connect_attempts=connect_attempts,
+                retry_backoff_seconds=retry_backoff_seconds,
                 reuse_sessions=resolved_reuse_sessions,
             )
             _POOLS[pool_key] = pool
         return pool
+
+
+def _is_retryable_connect_error(error: Exception, paramiko) -> bool:
+    authentication_errors = tuple(
+        error_type
+        for error_type in (
+            getattr(paramiko, "AuthenticationException", None),
+            getattr(paramiko, "BadAuthenticationType", None),
+            getattr(paramiko, "PasswordRequiredException", None),
+        )
+        if isinstance(error_type, type)
+    )
+    if authentication_errors and isinstance(error, authentication_errors):
+        return False
+
+    ssh_exception = getattr(paramiko, "SSHException", None)
+    retryable_errors = (OSError, EOFError, TimeoutError)
+    if isinstance(ssh_exception, type):
+        retryable_errors += (ssh_exception,)
+    return isinstance(error, retryable_errors)
 
 
 

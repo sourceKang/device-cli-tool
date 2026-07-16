@@ -14,6 +14,8 @@ targets:
   lab-neox:
     transport: ssh
     host: 192.0.2.10
+    ssh_connect_attempts: 3
+    ssh_retry_backoff_seconds: 1
     username: admin
     password_env: CLI_TOOL_SSH_PASSWORD
     catalog: builtin:neox

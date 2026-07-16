@@ -40,7 +40,7 @@ def test_parse_args_reports_installed_version(capsys):
         cli_tool_readonly_smoke.parse_args(["--version"])
 
     assert error.value.code == 0
-    assert "0.1.0" in capsys.readouterr().out
+    assert "device-cli-smoke" in capsys.readouterr().out
 
 
 def test_run_smoke_requires_password_env_without_env_node(monkeypatch):
@@ -86,6 +86,8 @@ def test_run_smoke_builds_ssh_transport_and_hides_output_by_default(monkeypatch,
     assert exit_code == 0
     assert captured["transport"]["password"] == "secret"
     assert captured["transport"]["max_sessions"] == 1
+    assert captured["transport"]["connect_attempts"] == 3
+    assert captured["transport"]["retry_backoff_seconds"] == 1.0
     assert captured["transport"]["reuse_sessions"] is False
     assert captured["catalog"] == "builtin:generic"
     assert captured["verify"]["command_id"] == "show_version"
@@ -98,6 +100,8 @@ def test_run_smoke_builds_ssh_transport_and_hides_output_by_default(monkeypatch,
     assert report["family"] == "generic"
     assert report["model"] == "generic"
     assert report["auth_source"] == "env:CLI_TOOL_SSH_PASSWORD"
+    assert report["ssh_connect_attempts"] == 3
+    assert report["ssh_retry_backoff_seconds"] == 1.0
     assert report["output_by_command"] == {}
 
 
@@ -298,7 +302,12 @@ def test_run_smoke_can_resolve_env_node_readwrite_default(monkeypatch, tmp_path)
             auth_profile="default",
             dut=SimpleNamespace(node_key="NODE1", device_ip="192.0.2.11"),
             readwrite=SimpleNamespace(username="rw-user", password="rw-password"),
-            node_target={},
+            node_target={
+                "cli": {
+                    "ssh_connect_attempts": 4,
+                    "ssh_retry_backoff_seconds": 0.25,
+                }
+            },
         )
 
     monkeypatch.setattr(cli_tool_readonly_smoke, "_load_environment_for_node", fake_load_environment_for_node)
@@ -321,6 +330,8 @@ def test_run_smoke_can_resolve_env_node_readwrite_default(monkeypatch, tmp_path)
     assert captured["transport"]["host"] == "192.0.2.11"
     assert captured["transport"]["username"] == "rw-user"
     assert captured["transport"]["password"] == "rw-password"
+    assert captured["transport"]["connect_attempts"] == 4
+    assert captured["transport"]["retry_backoff_seconds"] == 0.25
 
     report = _load_single_report(tmp_path)
     assert report["auth_source"] == "config_loader:default:readwrite"

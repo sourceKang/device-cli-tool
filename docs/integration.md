@@ -40,6 +40,8 @@ device-cli-smoke `
 
 設定優先順序為「CLI 參數 > target config > 工具預設值」。`--include-output` 與 `--no-report` 不會由 target config 自動開啟。
 
+SSH 預設最多連線 3 次，暫時性 network/SSH handshake 錯誤使用指數退避。Authentication failure 不重試，命令送出後的失敗也不自動重跑。
+
 ## Optional config_loader Adapter
 
 若被使用專案提供 `config_loader.load_environment()`，可直接使用：

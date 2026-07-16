@@ -7,6 +7,7 @@ Reusable multi-device CLI automation and read-only verification tool.
 - Read-only command catalogs under `configs/cli_tool/`.
 - Single-device generic `show_version` smoke workflow.
 - SSH transport based on Paramiko.
+- SSH connection retry for transient failures, with exponential backoff and no authentication retry.
 - Serial console transport based on pySerial.
 - Redacted JSON report output.
 - Redacted and size-limited `--include-output` report output.

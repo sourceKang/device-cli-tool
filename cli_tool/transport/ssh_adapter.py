@@ -14,6 +14,8 @@ class SshCliTransport:
     max_sessions: int | None = None
     acquire_timeout_seconds: float | None = None
     ssh_timeout: float = 15
+    connect_attempts: int = 3
+    retry_backoff_seconds: float = 1.0
     reuse_sessions: bool | None = None
 
     def run_commands(self, commands: list[str] | tuple[str, ...], *, owner: str | None = None) -> list[CliCommandOutput]:
@@ -28,6 +30,8 @@ class SshCliTransport:
             max_sessions=self.max_sessions,
             acquire_timeout_seconds=self.acquire_timeout_seconds,
             ssh_timeout=self.ssh_timeout,
+            connect_attempts=self.connect_attempts,
+            retry_backoff_seconds=self.retry_backoff_seconds,
             reuse_sessions=self.reuse_sessions,
         )
         results, _timing = pool.run_commands(

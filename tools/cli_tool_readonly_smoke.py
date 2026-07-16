@@ -22,6 +22,8 @@ DEFAULT_CATALOG = "builtin:generic"
 DEFAULT_COMMAND_ID = "show_version"
 DEFAULT_PASSWORD_ENV = "CLI_TOOL_SSH_PASSWORD"
 DEFAULT_SSH_TIMEOUT = 15.0
+DEFAULT_SSH_CONNECT_ATTEMPTS = 3
+DEFAULT_SSH_RETRY_BACKOFF_SECONDS = 1.0
 DEFAULT_SERIAL_BAUDRATE = 115200
 DEFAULT_SERIAL_TIMEOUT = 15.0
 DEFAULT_REPORT_DIR = "reports/cli-tool"
@@ -44,6 +46,8 @@ class SmokeRunConfig:
     catalog: Path
     command_id: str
     ssh_timeout: float
+    ssh_connect_attempts: int
+    ssh_retry_backoff_seconds: float
     baudrate: int
     serial_timeout: float
     report_dir: Path
@@ -79,6 +83,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--param", action="append", default=[], help="Command template parameter as key=value.")
     parser.add_argument("--owner", default="cli-tool-readonly-smoke", help="Owner label for SSH timing diagnostics.")
     parser.add_argument("--ssh-timeout", type=float, help="SSH connect/auth timeout in seconds.")
+    parser.add_argument("--ssh-connect-attempts", type=int, help="Maximum SSH connection attempts.")
+    parser.add_argument(
+        "--ssh-retry-backoff-seconds",
+        type=float,
+        help="Initial SSH retry backoff in seconds; doubles after each failed attempt.",
+    )
     parser.add_argument("--serial-port", help="Serial console port, for example COM5.")
     parser.add_argument("--baudrate", type=int, help="Serial console baudrate.")
     parser.add_argument("--serial-timeout", type=float, help="Serial read/login timeout in seconds.")
@@ -159,6 +169,20 @@ def _resolve_smoke_config(args: argparse.Namespace) -> SmokeRunConfig:
         "ssh_timeout",
         DEFAULT_SSH_TIMEOUT,
     )
+    ssh_connect_attempts = _positive_int(
+        args.ssh_connect_attempts
+        if args.ssh_connect_attempts is not None
+        else cli_config.get("ssh_connect_attempts"),
+        "ssh_connect_attempts",
+        DEFAULT_SSH_CONNECT_ATTEMPTS,
+    )
+    ssh_retry_backoff_seconds = _non_negative_float(
+        args.ssh_retry_backoff_seconds
+        if args.ssh_retry_backoff_seconds is not None
+        else cli_config.get("ssh_retry_backoff_seconds"),
+        "ssh_retry_backoff_seconds",
+        DEFAULT_SSH_RETRY_BACKOFF_SECONDS,
+    )
     serial_timeout = _positive_float(
         args.serial_timeout if args.serial_timeout is not None else cli_config.get("serial_timeout", timeout),
         "serial_timeout",
@@ -176,6 +200,8 @@ def _resolve_smoke_config(args: argparse.Namespace) -> SmokeRunConfig:
         catalog=catalog,
         command_id=command_id,
         ssh_timeout=ssh_timeout,
+        ssh_connect_attempts=ssh_connect_attempts,
+        ssh_retry_backoff_seconds=ssh_retry_backoff_seconds,
         baudrate=baudrate,
         serial_timeout=serial_timeout,
         report_dir=report_dir,
@@ -251,6 +277,8 @@ def _build_transport(config: SmokeRunConfig):
         password=target.password,
         max_sessions=1,
         ssh_timeout=config.ssh_timeout,
+        connect_attempts=config.ssh_connect_attempts,
+        retry_backoff_seconds=config.ssh_retry_backoff_seconds,
         reuse_sessions=False,
     )
 
@@ -351,6 +379,20 @@ def _positive_float(value, name: str, default: float) -> float:
     return resolved
 
 
+def _non_negative_float(value, name: str, default: float) -> float:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        raise SystemExit(f"node_target.cli.{name} must be a non-negative number")
+    try:
+        resolved = float(value)
+    except (TypeError, ValueError) as error:
+        raise SystemExit(f"node_target.cli.{name} must be a non-negative number") from error
+    if resolved < 0:
+        raise SystemExit(f"node_target.cli.{name} must be a non-negative number")
+    return resolved
+
+
 def _positive_int(value, name: str, default: int) -> int:
     if value is None:
         return default
@@ -407,6 +449,8 @@ def _build_report(
         "username": target.username,
         "auth_source": target.auth_source,
         "owner": args.owner,
+        "ssh_connect_attempts": config.ssh_connect_attempts if target.transport == "ssh" else None,
+        "ssh_retry_backoff_seconds": config.ssh_retry_backoff_seconds if target.transport == "ssh" else None,
         "missing_by_command": result.missing_by_command,
         "output_by_command": _prepare_output_by_command(
             result.output_by_command,
