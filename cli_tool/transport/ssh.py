@@ -11,6 +11,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
 
+from cli_tool.transport.readiness import (
+    detect_prompt,
+    ends_with_prompt,
+    normalize_stream_text,
+    strip_command_envelope,
+)
+
 
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 LOGOUT_CONFIRM_PROMPT = re.compile(r"logout\s+system\s+now\s*\(y/n\)\?", re.IGNORECASE)
@@ -128,14 +135,51 @@ class SshCliClient:
         return normalize_cli_output("".join(chunks))
 
     @staticmethod
-    def _read_command_output(channel, *, max_pager_continuations: int = 5) -> str:
-        output_parts = [SshCliClient._read_available(channel)]
-        for _ in range(max_pager_continuations):
-            if not PAGER_PROMPT.search(output_parts[-1]):
-                return "\n".join(output_parts)
-            channel.send("c")
-            output_parts.append(SshCliClient._read_available(channel, first_wait=0.2, idle_wait=0.4, max_wait=8))
-        raise RuntimeError("CLI pager did not finish after sending continue")
+    def _read_until_ready(
+        channel,
+        *,
+        timeout: float,
+        prompt: str | None = None,
+        stop_patterns: tuple[tuple[str, re.Pattern[str]], ...] = (),
+        max_pager_continuations: int = 5,
+    ) -> tuple[str, str, str | None]:
+        """Read until an actual prompt or an explicit intermediate prompt is seen."""
+        chunks: list[str] = []
+        deadline = time.monotonic() + timeout
+        handled_pagers = 0
+
+        while time.monotonic() < deadline:
+            if channel.recv_ready():
+                chunk = channel.recv(65535)
+                if not chunk:
+                    raise ConnectionError("SSH channel closed before CLI output became ready")
+                chunks.append(chunk.decode("utf-8", errors="replace"))
+            elif bool(getattr(channel, "closed", False)):
+                raise ConnectionError("SSH channel closed before CLI output became ready")
+
+            output = normalize_stream_text("".join(chunks))
+            pager_count = len(PAGER_PROMPT.findall(output))
+            while handled_pagers < pager_count:
+                if handled_pagers >= max_pager_continuations:
+                    raise RuntimeError("CLI pager did not finish after sending continue")
+                channel.send("c")
+                chunks.append("\n")
+                handled_pagers += 1
+
+            if prompt is not None and ends_with_prompt(output, prompt):
+                return output, "prompt", prompt
+            if prompt is None:
+                detected = detect_prompt(output)
+                if detected is not None:
+                    return output, "prompt", detected
+            for name, pattern in stop_patterns:
+                if pattern.search(output):
+                    return output, name, prompt
+
+            time.sleep(0.01)
+
+        expected = "CLI prompt" if prompt is None else f"CLI prompt {prompt!r}"
+        raise TimeoutError(f"timed out after {timeout:g}s waiting for {expected}")
 
 
 class SshCliSession:
@@ -165,6 +209,7 @@ class SshCliSession:
         self.connect_seconds = 0.0
         self.banner_read_seconds = 0.0
         self.session_id = f"ssh-{os.getpid()}-{id(self):x}"
+        self.prompt: str | None = None
 
     def connect(self) -> None:
         if self.is_healthy():
@@ -194,9 +239,13 @@ class SshCliSession:
                 finally:
                     self.connect_seconds += time.monotonic() - started
                 self.channel = self.client.invoke_shell(width=200, height=120)
-                self.channel.settimeout(3)
+                self.channel.settimeout(self.timeout)
                 started = time.monotonic()
-                SshCliClient._read_available(self.channel)
+                self.channel.send("\n")
+                _banner, _ready, self.prompt = SshCliClient._read_until_ready(
+                    self.channel,
+                    timeout=self.timeout,
+                )
                 self.banner_read_seconds += time.monotonic() - started
                 return
             except Exception as error:
@@ -233,21 +282,27 @@ class SshCliSession:
     def run_command(self, command: str) -> tuple[str, float, bool]:
         if self.channel is None:
             raise RuntimeError("SSH channel is not available")
+        if self.prompt is None:
+            raise RuntimeError("SSH CLI prompt was not established")
         started = time.monotonic()
         confirmed = False
         self.channel.send(command + "\n")
-        output = SshCliClient._read_command_output(self.channel)
-        if YES_NO_CONFIRM_PROMPT.search(output):
+        output, ready, _prompt = SshCliClient._read_until_ready(
+            self.channel,
+            timeout=self.timeout,
+            prompt=self.prompt,
+            stop_patterns=(("confirmation", YES_NO_CONFIRM_PROMPT),),
+        )
+        if ready == "confirmation":
             confirmed = True
             self.channel.send("y\n")
-            output = "\n".join(
-                [
-                    output,
-                    SshCliClient._read_command_output(
-                        self.channel,
-                    ),
-                ]
+            confirmed_output, _ready, _prompt = SshCliClient._read_until_ready(
+                self.channel,
+                timeout=self.timeout,
+                prompt=self.prompt,
             )
+            output = "\n".join([output, confirmed_output])
+        output = strip_command_envelope(output, command, self.prompt)
         return output, time.monotonic() - started, confirmed
 
     def close(self, *, logout: bool = True) -> float:

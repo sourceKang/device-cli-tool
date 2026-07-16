@@ -16,11 +16,13 @@ def verify_output_tokens(
 ) -> CliCommandVerification:
     expected = tuple_of_strings(expected_tokens)
     missing = tuple(missing_tokens(output, expected, case_sensitive=case_sensitive))
+    validation_errors = () if output.strip() else ("CLI output is empty",)
     return CliCommandVerification(
         command=command,
         output=output,
         expected_tokens=expected,
         missing_tokens=missing,
+        validation_errors=validation_errors,
     )
 
 

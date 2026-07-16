@@ -7,10 +7,13 @@ Reusable multi-device CLI automation and read-only verification tool.
 - Read-only command catalogs under `configs/cli_tool/`.
 - Single-device generic `show_version` smoke workflow.
 - SSH transport based on Paramiko.
+- Prompt-aware SSH and serial command completion with a bounded timeout.
 - SSH connection retry for transient failures, with exponential backoff and no authentication retry.
 - Serial console transport based on pySerial.
 - Redacted JSON report output.
 - Redacted and size-limited `--include-output` report output.
+- Empty CLI output always fails verification, including commands without expected tokens.
+- Fail-closed `show lc st` fixed-width table parser and JSON-safe line-card snapshot workflow.
 - Optional `--env-node` integration for SSH or serial settings from a consuming project's `node_target.cli` config.
 
 The current operational target is one device per CLI invocation. Multi-device concurrent execution is intentionally out of scope for now.
