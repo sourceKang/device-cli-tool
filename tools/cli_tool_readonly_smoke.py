@@ -452,6 +452,7 @@ def _build_report(
         "ssh_connect_attempts": config.ssh_connect_attempts if target.transport == "ssh" else None,
         "ssh_retry_backoff_seconds": config.ssh_retry_backoff_seconds if target.transport == "ssh" else None,
         "missing_by_command": result.missing_by_command,
+        "validation_errors_by_command": getattr(result, "validation_errors_by_command", {}),
         "output_by_command": _prepare_output_by_command(
             result.output_by_command,
             include_output=args.include_output,

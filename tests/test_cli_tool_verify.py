@@ -61,3 +61,12 @@ def test_verify_cli_outputs_marks_missing_command_output_as_failed():
 
     assert not result.passed
     assert result.missing_by_command == {"show vlan 100": ["VLAN Name"]}
+    assert result.validation_errors_by_command == {"show vlan 100": ["CLI output is empty"]}
+
+
+def test_verify_output_tokens_rejects_empty_output_without_expected_tokens():
+    result = verify_output_tokens("show version", " \r\n\t", [])
+
+    assert not result.passed
+    assert result.missing_tokens == ()
+    assert result.validation_errors == ("CLI output is empty",)

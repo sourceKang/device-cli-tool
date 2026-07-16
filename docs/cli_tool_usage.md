@@ -11,12 +11,15 @@
 - 透過 `CliTransport` 介面抽象命令執行方式。
 - 透過 `SshCliTransport` 包裝本專案既有 SSH session pool。
 - SSH connect/auth 前置階段遇到暫時性錯誤時可重試，預設最多 3 次並採指數退避；認證錯誤不重試。
+- SSH 與 Serial command 會等待實際 CLI prompt，並以整體 timeout 防止無限等待；不再以固定 sleep 或短暫 idle 判斷 command 已完成。
 - 透過 `SerialCliTransport` 使用 serial console，例如 `COM5`。
 - 針對 UG 常見 `-- more --` pager prompt 送出 continue，避免長輸出被第一頁截斷。
 - 透過 fake transport 進行離線單元測試。
 - 手動執行單台設備 read-only smoke 工具，預設跑 `show_version`。
 - 透過 `--env-node` 讀取被使用專案的 `node_target.cli`，自動選擇 SSH 或 Serial transport。
 - 產生 redacted JSON smoke report。
+- CLI output 為空白時一律驗證失敗，即使 catalog 的 `expected_tokens` 為空。
+- 提供 fail-closed 的 `show lc st` parser，可產生 JSON-safe line-card Snapshot。
 - `--include-output` 會先套用 redaction，且每個 command output 有字數上限。
 
 目前尚未支援：
@@ -108,7 +111,55 @@ commands:
 - `readonly: true` 只允許 show/display 類命令。
 - 尚未確認的 IES52XX / OLT140X command 不要先猜進 catalog。
 - 若不同 model/firmware 輸出差異很大，應拆 model catalog 或 driver normalizer。
-- `expected_tokens` 可先留空，作為 smoke/connectivity 檢查；正式驗證再補期待值。
+- `expected_tokens` 可先留空，但 output 仍必須包含非空白內容；正式驗證應補上已由 UG 或去敏實機 output 確認的期待值。
+
+## Line-card Preflight 核心能力
+
+本 package 提供 `run_line_card_preflight`，負責執行 catalog 核准的單一 read-only command，並將固定欄寬的 `show lc st` 表格解析成 Snapshot：
+
+```python
+from pathlib import Path
+
+from cli_tool.workflows.line_card_preflight import run_line_card_preflight
+
+snapshot = run_line_card_preflight(
+    driver,
+    transport,
+    command_id="show_line_card_status",
+    owner="preflight:NODE1",
+)
+Path("reports/preflight/NODE1.json").write_text(
+    snapshot.to_json(),
+    encoding="utf-8",
+)
+```
+
+Snapshot schema：
+
+```json
+{
+  "schema_version": 1,
+  "command": "show lc st",
+  "cards": [
+    {
+      "slot": "1",
+      "card_type": "SANITIZED_CARD_TYPE",
+      "status": "Active",
+      "fw_version": "SANITIZED_FW_VERSION"
+    }
+  ]
+}
+```
+
+安全與驗證行為：
+
+- `Card Type`、`Status`、`FW Version` 三個 header 缺任一個即失敗。
+- 任一資料列缺少上述欄位值即失敗。
+- 空 output 或零資料列不得產生成功 Snapshot。
+- parser 遇到未知欄位順序會失敗，不猜測設備資料。
+- pytest session cache、per-node 共用、report 路徑與 EMS UI/config 比對由使用專案負責。
+
+目前尚未把 `show lc st` 加入任何內建 family catalog。加入前必須確認適用的設備 family/model、prompt，以及至少一份去敏實機 output；確認後的 catalog command 應使用 `expected_tokens: ["Card Type", "Status", "FW Version"]`。
 
 ## 離線使用範例
 

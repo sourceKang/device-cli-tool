@@ -5,6 +5,12 @@ import time
 from dataclasses import dataclass
 
 from cli_tool.models import CliCommandOutput
+from cli_tool.transport.readiness import (
+    detect_prompt,
+    ends_with_prompt,
+    normalize_stream_text,
+    strip_command_envelope,
+)
 
 
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -63,6 +69,7 @@ class SerialCliSession:
         self.baudrate = baudrate
         self.timeout = timeout
         self.connection = None
+        self.prompt: str | None = None
 
     def connect(self) -> None:
         if self.connection is not None and bool(getattr(self.connection, "is_open", True)):
@@ -85,8 +92,22 @@ class SerialCliSession:
             dsrdtr=False,
         )
         self._write_line("")
-        banner = self._read_available(first_wait=0.5, idle_wait=0.3, max_wait=self.timeout)
-        self._login_if_prompted(banner)
+        _banner, ready, prompt = self._read_until_ready(
+            prompt=None,
+            stop_patterns=(("login", LOGIN_PROMPT), ("password", PASSWORD_PROMPT)),
+        )
+        if ready == "login":
+            self._write_line(self.username)
+            _login_output, ready, prompt = self._read_until_ready(
+                prompt=None,
+                stop_patterns=(("password", PASSWORD_PROMPT),),
+            )
+        if ready == "password":
+            self._write_line(self.password)
+            _password_output, ready, prompt = self._read_until_ready(prompt=None)
+        if ready != "prompt" or prompt is None:
+            raise RuntimeError("serial CLI prompt was not established")
+        self.prompt = prompt
 
     def run_commands(self, commands: list[str]) -> list[CliCommandOutput]:
         self.connect()
@@ -98,12 +119,21 @@ class SerialCliSession:
     def run_command(self, command: str) -> SerialCommandResult:
         if self.connection is None:
             raise RuntimeError("serial connection is not available")
+        if self.prompt is None:
+            raise RuntimeError("serial CLI prompt was not established")
         self._write_line(command)
-        output = self._read_command_output()
-        if YES_NO_CONFIRM_PROMPT.search(output):
+        output, ready, _prompt = self._read_until_ready(
+            prompt=self.prompt,
+            stop_patterns=(("confirmation", YES_NO_CONFIRM_PROMPT),),
+        )
+        if ready == "confirmation":
             self._write_line("y")
-            output = "\n".join([output, self._read_command_output()])
-        return SerialCommandResult(command=command, output=output)
+            confirmed_output, _ready, _prompt = self._read_until_ready(prompt=self.prompt)
+            output = "\n".join([output, confirmed_output])
+        return SerialCommandResult(
+            command=command,
+            output=strip_command_envelope(output, command, self.prompt),
+        )
 
     def close(self, *, logout: bool = True) -> None:
         connection = self.connection
@@ -122,22 +152,49 @@ class SerialCliSession:
                 close()
             self.connection = None
 
-    def _login_if_prompted(self, output: str) -> None:
-        if LOGIN_PROMPT.search(output):
-            self._write_line(self.username)
-            output = self._read_available(first_wait=0.2, idle_wait=0.3, max_wait=self.timeout)
-        if PASSWORD_PROMPT.search(output):
-            self._write_line(self.password)
-            self._read_available(first_wait=0.2, idle_wait=0.4, max_wait=self.timeout)
+    def _read_until_ready(
+        self,
+        *,
+        prompt: str | None,
+        stop_patterns: tuple[tuple[str, re.Pattern[str]], ...] = (),
+        max_pager_continuations: int = 5,
+    ) -> tuple[str, str, str | None]:
+        if self.connection is None:
+            raise RuntimeError("serial connection is not available")
 
-    def _read_command_output(self, *, max_pager_continuations: int = 5) -> str:
-        output_parts = [self._read_available(first_wait=0.5, idle_wait=0.4, max_wait=self.timeout)]
-        for _ in range(max_pager_continuations):
-            if not PAGER_PROMPT.search(output_parts[-1]):
-                return "\n".join(output_parts)
-            self._write_raw("c")
-            output_parts.append(self._read_available(first_wait=0.2, idle_wait=0.4, max_wait=self.timeout))
-        raise RuntimeError("CLI pager did not finish after sending continue")
+        chunks: list[bytes] = []
+        deadline = time.monotonic() + self.timeout
+        handled_pagers = 0
+        while time.monotonic() < deadline:
+            waiting = int(getattr(self.connection, "in_waiting", 0))
+            if waiting > 0:
+                chunks.append(self.connection.read(waiting))
+            elif not bool(getattr(self.connection, "is_open", True)):
+                raise ConnectionError("serial connection closed before CLI output became ready")
+
+            output = normalize_stream_text(b"".join(chunks).decode("utf-8", errors="replace"))
+            pager_count = len(PAGER_PROMPT.findall(output))
+            while handled_pagers < pager_count:
+                if handled_pagers >= max_pager_continuations:
+                    raise RuntimeError("CLI pager did not finish after sending continue")
+                self._write_raw("c")
+                chunks.append(b"\n")
+                handled_pagers += 1
+
+            if prompt is not None and ends_with_prompt(output, prompt):
+                return output, "prompt", prompt
+            if prompt is None:
+                detected = detect_prompt(output)
+                if detected is not None:
+                    return output, "prompt", detected
+            for name, pattern in stop_patterns:
+                if pattern.search(output):
+                    return output, name, prompt
+
+            time.sleep(0.01)
+
+        expected = "CLI prompt" if prompt is None else f"CLI prompt {prompt!r}"
+        raise TimeoutError(f"timed out after {self.timeout:g}s waiting for {expected}")
 
     def _read_available(self, *, first_wait: float, idle_wait: float, max_wait: float) -> str:
         if self.connection is None:
