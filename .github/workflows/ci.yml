@@ -27,8 +27,8 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-      - name: Install test dependencies
-        run: python -m pip install --upgrade pip .[test]
+      - name: Install test and build dependencies
+        run: python -m pip install --upgrade pip setuptools wheel .[test]
       - name: Compile
         run: python -m compileall cli_tool tools tests
       - name: Test
