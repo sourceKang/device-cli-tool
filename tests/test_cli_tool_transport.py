@@ -100,6 +100,8 @@ def test_ssh_cli_transport_wraps_existing_session_pool(monkeypatch):
     assert captured["kwargs"]["max_sessions"] == 1
     assert captured["kwargs"]["connect_attempts"] == 3
     assert captured["kwargs"]["retry_backoff_seconds"] == 1.0
+    assert captured["kwargs"]["known_hosts_path"] is None
+    assert captured["kwargs"]["allow_unknown_host_key"] is False
     assert captured["kwargs"]["reuse_sessions"] is False
     assert fake_pool.commands == ["show version"]
     assert fake_pool.owner == "adapter-test"
@@ -224,6 +226,12 @@ def test_ssh_session_retries_transient_connect_errors(monkeypatch):
         def __init__(self) -> None:
             self.connected = False
 
+        def load_system_host_keys(self) -> None:
+            pass
+
+        def load_host_keys(self, path: str) -> None:
+            pass
+
         def set_missing_host_key_policy(self, policy) -> None:
             pass
 
@@ -244,7 +252,8 @@ def test_ssh_session_retries_transient_connect_errors(monkeypatch):
 
     fake_paramiko = SimpleNamespace(
         SSHClient=FakeSshClient,
-        AutoAddPolicy=lambda: object(),
+        RejectPolicy=lambda: object(),
+        WarningPolicy=lambda: object(),
         SSHException=type("FakeSshException", (Exception,), {}),
         AuthenticationException=type("FakeAuthenticationException", (Exception,), {}),
         BadAuthenticationType=type("FakeBadAuthenticationType", (Exception,), {}),
@@ -277,6 +286,12 @@ def test_ssh_session_does_not_retry_authentication_errors(monkeypatch):
         pass
 
     class FakeSshClient:
+        def load_system_host_keys(self) -> None:
+            pass
+
+        def load_host_keys(self, path: str) -> None:
+            pass
+
         def set_missing_host_key_policy(self, policy) -> None:
             pass
 
@@ -292,7 +307,8 @@ def test_ssh_session_does_not_retry_authentication_errors(monkeypatch):
 
     fake_paramiko = SimpleNamespace(
         SSHClient=FakeSshClient,
-        AutoAddPolicy=lambda: object(),
+        RejectPolicy=lambda: object(),
+        WarningPolicy=lambda: object(),
         SSHException=type("FakeSshException", (Exception,), {}),
         AuthenticationException=FakeAuthenticationException,
         BadAuthenticationType=type("FakeBadAuthenticationType", (Exception,), {}),

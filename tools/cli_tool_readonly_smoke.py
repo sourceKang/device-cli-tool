@@ -48,6 +48,8 @@ class SmokeRunConfig:
     ssh_timeout: float
     ssh_connect_attempts: int
     ssh_retry_backoff_seconds: float
+    known_hosts_path: Path | None
+    allow_unknown_host_key: bool
     baudrate: int
     serial_timeout: float
     report_dir: Path
@@ -88,6 +90,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--ssh-retry-backoff-seconds",
         type=float,
         help="Initial SSH retry backoff in seconds; doubles after each failed attempt.",
+    )
+    parser.add_argument(
+        "--known-hosts",
+        help="Additional OpenSSH known_hosts file. System host keys are always loaded.",
+    )
+    parser.add_argument(
+        "--allow-unknown-host-key",
+        action="store_true",
+        help=(
+            "Explicitly allow an unknown SSH host key with a warning. "
+            "This cannot be enabled from target YAML and should not be used in CI."
+        ),
     )
     parser.add_argument("--serial-port", help="Serial console port, for example COM5.")
     parser.add_argument("--baudrate", type=int, help="Serial console baudrate.")
@@ -183,6 +197,9 @@ def _resolve_smoke_config(args: argparse.Namespace) -> SmokeRunConfig:
         "ssh_retry_backoff_seconds",
         DEFAULT_SSH_RETRY_BACKOFF_SECONDS,
     )
+    known_hosts_value = args.known_hosts or _optional_string(cli_config, "known_hosts")
+    known_hosts_path = Path(known_hosts_value) if known_hosts_value else None
+    allow_unknown_host_key = bool(args.allow_unknown_host_key)
     serial_timeout = _positive_float(
         args.serial_timeout if args.serial_timeout is not None else cli_config.get("serial_timeout", timeout),
         "serial_timeout",
@@ -202,6 +219,8 @@ def _resolve_smoke_config(args: argparse.Namespace) -> SmokeRunConfig:
         ssh_timeout=ssh_timeout,
         ssh_connect_attempts=ssh_connect_attempts,
         ssh_retry_backoff_seconds=ssh_retry_backoff_seconds,
+        known_hosts_path=known_hosts_path,
+        allow_unknown_host_key=allow_unknown_host_key,
         baudrate=baudrate,
         serial_timeout=serial_timeout,
         report_dir=report_dir,
@@ -280,6 +299,8 @@ def _build_transport(config: SmokeRunConfig):
         connect_attempts=config.ssh_connect_attempts,
         retry_backoff_seconds=config.ssh_retry_backoff_seconds,
         reuse_sessions=False,
+        known_hosts_path=config.known_hosts_path,
+        allow_unknown_host_key=config.allow_unknown_host_key,
     )
 
 
@@ -451,6 +472,12 @@ def _build_report(
         "owner": args.owner,
         "ssh_connect_attempts": config.ssh_connect_attempts if target.transport == "ssh" else None,
         "ssh_retry_backoff_seconds": config.ssh_retry_backoff_seconds if target.transport == "ssh" else None,
+        "host_key_verification": (
+            "allow_unknown_with_warning" if config.allow_unknown_host_key else "strict"
+        )
+        if target.transport == "ssh"
+        else None,
+        "custom_known_hosts": bool(config.known_hosts_path) if target.transport == "ssh" else None,
         "missing_by_command": result.missing_by_command,
         "validation_errors_by_command": getattr(result, "validation_errors_by_command", {}),
         "output_by_command": _prepare_output_by_command(

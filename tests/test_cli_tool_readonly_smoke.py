@@ -89,6 +89,8 @@ def test_run_smoke_builds_ssh_transport_and_hides_output_by_default(monkeypatch,
     assert captured["transport"]["connect_attempts"] == 3
     assert captured["transport"]["retry_backoff_seconds"] == 1.0
     assert captured["transport"]["reuse_sessions"] is False
+    assert captured["transport"]["known_hosts_path"] is None
+    assert captured["transport"]["allow_unknown_host_key"] is False
     assert captured["catalog"] == "builtin:generic"
     assert captured["verify"]["command_id"] == "show_version"
     assert captured["verify"]["params"] == {"vid": "100"}
@@ -102,7 +104,37 @@ def test_run_smoke_builds_ssh_transport_and_hides_output_by_default(monkeypatch,
     assert report["auth_source"] == "env:CLI_TOOL_SSH_PASSWORD"
     assert report["ssh_connect_attempts"] == 3
     assert report["ssh_retry_backoff_seconds"] == 1.0
+    assert report["host_key_verification"] == "strict"
+    assert report["custom_known_hosts"] is False
     assert report["output_by_command"] == {}
+
+
+def test_run_smoke_forwards_explicit_unknown_host_key_opt_in(monkeypatch, tmp_path):
+    captured = _install_fake_smoke_dependencies(monkeypatch)
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_text("example ssh-ed25519 AAAA", encoding="utf-8")
+    args = cli_tool_readonly_smoke.parse_args(
+        [
+            "--node-key",
+            "node3",
+            "--host",
+            "192.0.2.10",
+            "--username",
+            "admin",
+            "--known-hosts",
+            str(known_hosts),
+            "--allow-unknown-host-key",
+            "--report-dir",
+            str(tmp_path / "reports"),
+        ]
+    )
+
+    assert cli_tool_readonly_smoke.run_smoke(args) == 0
+    assert captured["transport"]["known_hosts_path"] == known_hosts
+    assert captured["transport"]["allow_unknown_host_key"] is True
+    report = _load_single_report(tmp_path / "reports")
+    assert report["host_key_verification"] == "allow_unknown_with_warning"
+    assert report["custom_known_hosts"] is True
 
 
 def test_run_smoke_builds_serial_transport(monkeypatch, tmp_path):
