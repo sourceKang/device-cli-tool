@@ -21,6 +21,9 @@ class FakeFtpClient:
         pass
 
     def list_files(self, path):
+        self.last_listing_method = (
+            "legacy_unix" if self.captured.get("allow_legacy_listing") else "mlsd"
+        )
         return (
             RemoteFileInfo(
                 path="/safe/file.bin",
@@ -33,9 +36,15 @@ class FakeFtpClient:
         )
 
     def stat(self, path):
+        self.last_metadata_method = (
+            "legacy_unix" if self.captured.get("allow_legacy_listing") else "mlst"
+        )
         return self.list_files(path)[0]
 
     def exists(self, path):
+        self.last_metadata_method = (
+            "legacy_unix" if self.captured.get("allow_legacy_listing") else "mlst"
+        )
         return True
 
 
@@ -181,4 +190,69 @@ def test_transfer_cli_rejects_known_hosts_for_ftps():
     )
 
     with pytest.raises(SystemExit, match="only valid for SFTP"):
+        cli_tool_readonly_transfer.run_transfer(args)
+
+def test_transfer_cli_enables_strict_legacy_unix_listing(monkeypatch, capsys):
+    monkeypatch.setenv("CLI_TOOL_FTP_PASSWORD", "secret")
+    monkeypatch.setattr(cli_tool_readonly_transfer, "FtpReadOnlyClient", FakeFtpClient)
+    args = cli_tool_readonly_transfer.parse_args(
+        [
+            "list",
+            "--protocol",
+            "ftp",
+            "--allow-insecure-ftp",
+            "--allow-legacy-listing",
+            "--legacy-list-format",
+            "unix",
+            "--host",
+            "192.0.2.10",
+            "--username",
+            "admin",
+            "--no-report",
+        ]
+    )
+
+    assert cli_tool_readonly_transfer.run_transfer(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["legacy_listing"] == "enabled_unix"
+    assert payload["outcome"]["listing_method"] == "legacy_unix"
+    assert FakeFtpClient.captured["allow_legacy_listing"] is True
+    assert FakeFtpClient.captured["legacy_list_format"] == "unix"
+
+
+def test_transfer_cli_requires_both_legacy_listing_options():
+    args = cli_tool_readonly_transfer.parse_args(
+        [
+            "list",
+            "--protocol",
+            "ftp",
+            "--allow-insecure-ftp",
+            "--allow-legacy-listing",
+            "--host",
+            "192.0.2.10",
+            "--username",
+            "admin",
+        ]
+    )
+
+    with pytest.raises(SystemExit, match="provided together"):
+        cli_tool_readonly_transfer.run_transfer(args)
+
+
+def test_transfer_cli_rejects_legacy_listing_for_sftp():
+    args = cli_tool_readonly_transfer.parse_args(
+        [
+            "list",
+            "--host",
+            "192.0.2.10",
+            "--username",
+            "admin",
+            "--allow-legacy-listing",
+            "--legacy-list-format",
+            "unix",
+        ]
+    )
+
+    with pytest.raises(SystemExit, match="not valid for SFTP"):
         cli_tool_readonly_transfer.run_transfer(args)

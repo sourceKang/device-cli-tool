@@ -9,7 +9,7 @@ Reusable multi-device CLI automation and read-only verification tool.
 - SSH transport based on Paramiko.
 - Strict SSH host-key verification by default, with optional explicit `known_hosts`.
 - Root-bounded SFTP read-only list/stat/exists/download operations.
-- Verified Explicit/Implicit FTPS and explicit opt-in plaintext FTP read-only transfers.
+- Verified Explicit/Implicit FTPS and explicit opt-in plaintext FTP read-only transfers, including strict opt-in UNIX legacy metadata.
 - Prompt-aware SSH and serial command completion with a bounded timeout.
 - SSH connection retry for transient failures, with exponential backoff and no authentication retry.
 - Serial console transport based on pySerial.
@@ -111,4 +111,4 @@ Telnet is available only with the explicit `--allow-insecure-telnet` flag. It re
 
 ## FTPS and FTP
 
-The `device-cli-transfer` command supports verified Explicit FTPS, verified Implicit FTPS, and plaintext FTP with the mandatory `--allow-insecure-ftp` flag. FTPS protects the control and data channels; certificate verification is strict by default. See `docs/ftp_ftps.md`.
+The `device-cli-transfer` command supports verified Explicit FTPS, verified Implicit FTPS, and plaintext FTP with the mandatory `--allow-insecure-ftp` flag. Servers without MLSD/MLST require both `--allow-legacy-listing` and `--legacy-list-format unix`; no fallback is implicit. FTPS protects the control and data channels, and certificate verification is strict by default. See `docs/ftp_ftps.md`.

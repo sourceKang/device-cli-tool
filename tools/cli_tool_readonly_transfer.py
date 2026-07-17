@@ -86,6 +86,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Use FTP active mode instead of passive mode.",
     )
+    parser.add_argument(
+        "--allow-legacy-listing",
+        action="store_true",
+        help="Allow strict opt-in legacy LIST metadata when MLSD/MLST are unsupported.",
+    )
+    parser.add_argument(
+        "--legacy-list-format",
+        choices=["unix"],
+        help="Required legacy LIST format; currently only strict UNIX is supported.",
+    )
     parser.add_argument("--remote-root", default="/", help="Allowed absolute remote root.")
     parser.add_argument("--remote-path", default=".", help="Path inside --remote-root.")
     parser.add_argument("--local-path", help="Local destination required by download.")
@@ -187,6 +197,8 @@ def _build_client(
         ca_file=args.ca_file,
         allow_unverified_tls=args.allow_unverified_tls,
         allow_insecure_ftp=args.allow_insecure_ftp,
+        allow_legacy_listing=args.allow_legacy_listing,
+        legacy_list_format=args.legacy_list_format,
         max_download_bytes=args.max_download_bytes,
     )
 
@@ -196,15 +208,26 @@ def _run_operation(client, args: argparse.Namespace) -> dict[str, object]:
         items = client.list_files(args.remote_path)
         return {
             "count": len(items),
+            "listing_method": getattr(client, "last_listing_method", None),
             "files": file_list_payload(items, include_paths=args.include_paths),
         }
     if args.operation == "stat":
         info = client.stat(args.remote_path)
-        return {"file": file_info_payload(info, include_paths=args.include_paths)}
+        return {
+            "metadata_method": getattr(client, "last_metadata_method", None),
+            "file": file_info_payload(info, include_paths=args.include_paths),
+        }
     if args.operation == "exists":
-        return {"exists": client.exists(args.remote_path)}
+        exists = client.exists(args.remote_path)
+        return {
+            "exists": exists,
+            "metadata_method": getattr(client, "last_metadata_method", None),
+        }
     result = client.download(args.remote_path, args.local_path, overwrite=args.overwrite)
-    return {"download": download_payload(result, include_paths=args.include_paths)}
+    return {
+        "metadata_method": getattr(client, "last_metadata_method", None),
+        "download": download_payload(result, include_paths=args.include_paths),
+    }
 
 
 def _validate_args(args: argparse.Namespace) -> None:
@@ -230,7 +253,12 @@ def _validate_args(args: argparse.Namespace) -> None:
     if args.protocol != "sftp" and (args.known_hosts or args.allow_unknown_host_key):
         raise SystemExit("known-host options are only valid for SFTP")
     if args.protocol == "sftp" and (
-        args.ca_file or args.allow_unverified_tls or args.allow_insecure_ftp or args.active_mode
+        args.ca_file
+        or args.allow_unverified_tls
+        or args.allow_insecure_ftp
+        or args.active_mode
+        or args.allow_legacy_listing
+        or args.legacy_list_format
     ):
         raise SystemExit("FTP/TLS options are not valid for SFTP")
     if args.protocol == "ftp" and not args.allow_insecure_ftp:
@@ -239,6 +267,14 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--allow-insecure-ftp is only valid with --protocol ftp")
     if args.protocol not in FTP_PROTOCOLS and args.active_mode:
         raise SystemExit("--active-mode is only valid for FTP/FTPS")
+    if args.allow_legacy_listing != (args.legacy_list_format is not None):
+        raise SystemExit(
+            "--allow-legacy-listing and --legacy-list-format must be provided together"
+        )
+    if args.protocol not in FTP_PROTOCOLS and (
+        args.allow_legacy_listing or args.legacy_list_format
+    ):
+        raise SystemExit("legacy listing options are only valid for FTP/FTPS")
     if args.protocol not in {"ftps", "ftps-implicit"} and (
         args.ca_file or args.allow_unverified_tls
     ):
@@ -316,6 +352,11 @@ def _build_report(
             "private" if is_ftps else "plaintext" if args.protocol == "ftp" else None
         ),
         "passive": (not args.active_mode) if args.protocol in FTP_PROTOCOLS else None,
+        "legacy_listing": (
+            f"enabled_{args.legacy_list_format}" if args.allow_legacy_listing else "disabled"
+        )
+        if args.protocol in FTP_PROTOCOLS
+        else None,
         "max_download_bytes": args.max_download_bytes,
         "outcome": outcome,
         "error_type": type(error).__name__ if error else None,

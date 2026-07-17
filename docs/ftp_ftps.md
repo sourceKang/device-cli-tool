@@ -1,6 +1,6 @@
 # FTPS and FTP read-only transfers
 
-Version 0.5.0 extends the transfer contract to Explicit FTPS, Implicit FTPS, and opt-in plaintext FTP.
+Version 0.5.1 supports Explicit FTPS, Implicit FTPS, opt-in plaintext FTP, and strict opt-in UNIX legacy metadata for servers without MLSD/MLST.
 
 ## Protocol selection
 
@@ -53,11 +53,28 @@ device-cli-transfer exists `
   --remote-path inventory.json
 ```
 
+## Legacy UNIX listing
+
+MLSD and MLST remain the default. A server that rejects those commands can use the strict UNIX parser only when both options are present:
+
+```powershell
+device-cli-transfer list `
+  --protocol ftp `
+  --allow-insecure-ftp `
+  --allow-legacy-listing `
+  --legacy-list-format unix `
+  --host 192.0.2.10 `
+  --username readonly `
+  --remote-root /exports
+```
+
+The fallback runs only for unsupported-command replies. Authentication, permission, path, malformed metadata, special-file, and unsafe-name errors remain failures. Every LIST line must match the selected format; unknown lines are never skipped. Symlinks are identified and remain ineligible for download. UNIX LIST timestamps are validated but directory-list results keep `modified_time` unknown because the server timezone and missing year cannot be inferred safely. Reports record whether legacy fallback was enabled and which method actually handled a listing.
+
 FTP and FTPS use passive mode by default. `--active-mode` is available only when the lab network requires it.
 
 ## Fail-closed metadata
 
-Structured directory listing requires MLSD. File metadata uses MLST and may fall back to SIZE plus MDTM for regular files. The tool does not guess UNIX or DOS LIST formats because that could misclassify paths or silently accept malformed metadata.
+Structured directory listing prefers MLSD, retrying without OPTS facts when necessary. File metadata prefers MLST. SIZE alone is never used to infer that an entry is a regular non-symlink file. When strict legacy UNIX mode is explicitly enabled, LIST supplies type and size while MDTM may supply an exact file timestamp. Without MLSD/MLST or an explicit strict legacy format, the operation fails closed.
 
 All protocols retain:
 
