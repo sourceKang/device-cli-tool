@@ -9,6 +9,7 @@ Reusable multi-device CLI automation and read-only verification tool.
 - SSH transport based on Paramiko.
 - Strict SSH host-key verification by default, with optional explicit `known_hosts`.
 - Root-bounded SFTP read-only list/stat/exists/download operations.
+- Verified Explicit/Implicit FTPS and explicit opt-in plaintext FTP read-only transfers.
 - Prompt-aware SSH and serial command completion with a bounded timeout.
 - SSH connection retry for transient failures, with exponential backoff and no authentication retry.
 - Serial console transport based on pySerial.
@@ -102,8 +103,12 @@ device-cli-transfer download `
   --local-path artifacts\messages.log
 ```
 
-SFTP is a separate file-transfer API, not an interactive CLI transport. It does not support upload, delete, rename, recursive download, FTP, or Telnet. Paths and target identifiers are hashed in stdout and reports unless `--include-paths` is explicit.
+SFTP is a separate file-transfer backend, not an interactive CLI transport. It does not support upload, delete, rename, or recursive download. Paths and target identifiers are hashed in stdout and reports unless `--include-paths` is explicit.
 
 ## Legacy Telnet
 
-Telnet is available only with the explicit --allow-insecure-telnet flag. It reuses prompt-aware command completion and read-only catalogs, but credentials and output remain plaintext on the network. See docs/telnet.md.
+Telnet is available only with the explicit `--allow-insecure-telnet` flag. It reuses prompt-aware command completion and read-only catalogs, but credentials and output remain plaintext on the network. See `docs/telnet.md`.
+
+## FTPS and FTP
+
+The `device-cli-transfer` command supports verified Explicit FTPS, verified Implicit FTPS, and plaintext FTP with the mandatory `--allow-insecure-ftp` flag. FTPS protects the control and data channels; certificate verification is strict by default. See `docs/ftp_ftps.md`.

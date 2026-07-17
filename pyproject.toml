@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "device-cli-tool"
-version = "0.4.0"
+version = "0.5.0"
 description = "Reusable multi-device CLI automation and read-only verification tool"
 readme = "README.md"
 requires-python = ">=3.11"
