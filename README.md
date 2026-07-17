@@ -1,4 +1,4 @@
-﻿# Device CLI Tool
+# Device CLI Tool
 
 Reusable multi-device CLI automation and read-only verification tool.
 
@@ -12,6 +12,7 @@ Reusable multi-device CLI automation and read-only verification tool.
 - Prompt-aware SSH and serial command completion with a bounded timeout.
 - SSH connection retry for transient failures, with exponential backoff and no authentication retry.
 - Serial console transport based on pySerial.
+- Explicit opt-in Telnet read-only transport for isolated legacy labs.
 - Redacted JSON report output.
 - Redacted and size-limited `--include-output` report output.
 - Empty CLI output always fails verification, including commands without expected tokens.
@@ -102,3 +103,7 @@ device-cli-transfer download `
 ```
 
 SFTP is a separate file-transfer API, not an interactive CLI transport. It does not support upload, delete, rename, recursive download, FTP, or Telnet. Paths and target identifiers are hashed in stdout and reports unless `--include-paths` is explicit.
+
+## Legacy Telnet
+
+Telnet is available only with the explicit --allow-insecure-telnet flag. It reuses prompt-aware command completion and read-only catalogs, but credentials and output remain plaintext on the network. See docs/telnet.md.
