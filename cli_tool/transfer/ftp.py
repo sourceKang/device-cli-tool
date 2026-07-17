@@ -4,6 +4,7 @@ import errno
 import ftplib
 import hashlib
 import os
+import re
 import socket
 import ssl
 from datetime import datetime, timezone
@@ -17,6 +18,26 @@ from cli_tool.transfer.sftp import DEFAULT_CHUNK_SIZE, DEFAULT_MAX_DOWNLOAD_BYTE
 
 FTP_PROTOCOLS = {"ftp", "ftps", "ftps-implicit"}
 DEFAULT_PORTS = {"ftp": 21, "ftps": 21, "ftps-implicit": 990}
+LEGACY_LIST_FORMATS = {"unix"}
+_UNIX_MONTHS = {
+    name: index
+    for index, name in enumerate(
+        ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"),
+        start=1,
+    )
+}
+
+_UNIX_LIST_PATTERN = re.compile(
+    r"^(?P<mode>[bcdlps-][rwxStTs-]{9}[.+@]?)\s+"
+    r"(?P<links>\d+)\s+"
+    r"(?P<owner>\S+)\s+"
+    r"(?P<group>\S+)\s+"
+    r"(?P<size>\d+)\s+"
+    r"(?P<month>Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+"
+    r"(?P<day>\d{1,2})\s+"
+    r"(?P<when>\d{2}:\d{2}|\d{4})\s+"
+    r"(?P<name>.+)$"
+)
 
 
 class FtpCapabilityError(RuntimeError):
@@ -62,6 +83,8 @@ class FtpReadOnlyClient:
         ca_file: str | Path | None = None,
         allow_unverified_tls: bool = False,
         allow_insecure_ftp: bool = False,
+        allow_legacy_listing: bool = False,
+        legacy_list_format: str | None = None,
         max_download_bytes: int = DEFAULT_MAX_DOWNLOAD_BYTES,
         chunk_size: int = DEFAULT_CHUNK_SIZE,
     ) -> None:
@@ -89,6 +112,16 @@ class FtpReadOnlyClient:
             )
         if normalized_protocol == "ftp" and (ca_file or allow_unverified_tls):
             raise ValueError("TLS options are not valid for plaintext FTP")
+        normalized_legacy_format = legacy_list_format.lower() if legacy_list_format else None
+        if allow_legacy_listing != (normalized_legacy_format is not None):
+            raise ValueError(
+                "allow_legacy_listing and legacy_list_format must be provided together"
+            )
+        if (
+            normalized_legacy_format is not None
+            and normalized_legacy_format not in LEGACY_LIST_FORMATS
+        ):
+            raise ValueError(f"unsupported legacy LIST format: {legacy_list_format}")
 
         self.host = host
         self.username = username
@@ -101,8 +134,12 @@ class FtpReadOnlyClient:
         self.ca_file = Path(ca_file).expanduser() if ca_file else None
         self.allow_unverified_tls = allow_unverified_tls
         self.allow_insecure_ftp = allow_insecure_ftp
+        self.allow_legacy_listing = allow_legacy_listing
+        self.legacy_list_format = normalized_legacy_format
         self.max_download_bytes = max_download_bytes
         self.chunk_size = chunk_size
+        self.last_listing_method: str | None = None
+        self.last_metadata_method: str | None = None
         self._ftp = None
 
     def __enter__(self) -> FtpReadOnlyClient:
@@ -142,15 +179,56 @@ class FtpReadOnlyClient:
         client = self._require_ftp()
         try:
             entries = list(client.mlsd(directory, facts=["type", "size", "modify"]))
-        except (ftplib.error_perm, AttributeError) as error:
-            raise FtpCapabilityError(
-                "FTP server must support MLSD for fail-closed structured directory listing"
-            ) from error
+        except AttributeError as error:
+            return self._legacy_list_files(directory, error)
+        except ftplib.error_perm as error:
+            if not _is_unsupported_command(error):
+                raise
+            try:
+                entries = list(client.mlsd(directory))
+            except AttributeError as retry_error:
+                return self._legacy_list_files(directory, retry_error)
+            except ftplib.error_perm as retry_error:
+                if not _is_unsupported_command(retry_error):
+                    raise
+                return self._legacy_list_files(directory, retry_error)
+
+        self.last_listing_method = "mlsd"
         results = [
-            _file_info_from_facts(self._resolve(f"{directory.rstrip('/')}/{name}"), facts)
+            _file_info_from_facts(self._resolve(_join_remote(directory, name)), facts)
             for name, facts in entries
             if name not in {".", ".."}
         ]
+        return tuple(sorted(results, key=lambda item: item.path))
+
+    def _legacy_list_files(
+        self,
+        directory: str,
+        unsupported_error: Exception,
+    ) -> tuple[RemoteFileInfo, ...]:
+        if not self.allow_legacy_listing or self.legacy_list_format != "unix":
+            raise FtpCapabilityError(
+                "FTP server must support MLSD unless strict legacy listing is explicitly enabled"
+            ) from unsupported_error
+
+        lines: list[str] = []
+        self._require_ftp().retrlines(f"LIST {directory}", lines.append)
+        results: list[RemoteFileInfo] = []
+        for line in lines:
+            name, size, is_directory, is_regular_file, is_symlink = _parse_unix_list_line(line)
+            if name in {".", ".."}:
+                continue
+            results.append(
+                RemoteFileInfo(
+                    path=self._resolve(_join_remote(directory, name)),
+                    size=size,
+                    modified_time=None,
+                    is_directory=is_directory,
+                    is_regular_file=is_regular_file,
+                    is_symlink=is_symlink,
+                )
+            )
+        self.last_listing_method = "legacy_unix"
         return tuple(sorted(results, key=lambda item: item.path))
 
     def stat(self, remote_path: str) -> RemoteFileInfo:
@@ -159,35 +237,58 @@ class FtpReadOnlyClient:
         try:
             response = client.sendcmd(f"MLST {resolved}")
             facts = _parse_mlst_response(response)
-            return _file_info_from_facts(resolved, facts)
+            info = _file_info_from_facts(resolved, facts)
+            self.last_metadata_method = "mlst"
+            return info
         except ftplib.error_perm as error:
+            if _is_unsupported_command(error):
+                return self._legacy_stat(resolved, error)
             if _is_not_found(error):
                 raise FileNotFoundError(resolved) from error
-            if not _is_unsupported_command(error):
-                raise
+            raise
 
+    def _legacy_stat(
+        self,
+        resolved: str,
+        unsupported_error: Exception,
+    ) -> RemoteFileInfo:
+        if not self.allow_legacy_listing or self.legacy_list_format != "unix":
+            raise FtpCapabilityError(
+                "FTP server must support MLST unless strict legacy listing is explicitly enabled"
+            ) from unsupported_error
+
+        lines: list[str] = []
         try:
-            size = client.size(resolved)
+            self._require_ftp().retrlines(f"LIST {resolved}", lines.append)
         except ftplib.error_perm as error:
             if _is_not_found(error):
                 raise FileNotFoundError(resolved) from error
+            raise
+        if len(lines) != 1:
             raise FtpCapabilityError(
-                "FTP server must support MLST or SIZE for fail-closed file metadata"
-            ) from error
-        if size is None:
-            raise FtpCapabilityError("FTP SIZE returned no file size")
+                "legacy UNIX LIST stat must return exactly one structured entry"
+            )
+
+        name, size, is_directory, is_regular_file, is_symlink = _parse_unix_list_line(lines[0])
+        if name != resolved.rsplit("/", 1)[-1]:
+            raise FtpCapabilityError("legacy UNIX LIST stat returned a different entry name")
+
         modified_time = None
-        try:
-            modified_time = _parse_modify_time(client.sendcmd(f"MDTM {resolved}").split()[-1])
-        except ftplib.error_perm:
-            pass
+        if is_regular_file:
+            try:
+                modified_time = _parse_modify_time(
+                    self._require_ftp().sendcmd(f"MDTM {resolved}").split()[-1]
+                )
+            except ftplib.error_perm:
+                pass
+        self.last_metadata_method = "legacy_unix"
         return RemoteFileInfo(
             path=resolved,
-            size=int(size),
+            size=size,
             modified_time=modified_time,
-            is_directory=False,
-            is_regular_file=True,
-            is_symlink=False,
+            is_directory=is_directory,
+            is_regular_file=is_regular_file,
+            is_symlink=is_symlink,
         )
 
     def exists(self, remote_path: str) -> bool:
@@ -322,6 +423,8 @@ def _file_info_from_facts(path: str, facts: dict[str, str]) -> RemoteFileInfo:
     is_regular = entry_type == "file"
     if not (is_directory or is_regular or is_symlink):
         raise FtpCapabilityError(f"unsupported FTP MLST type: {entry_type or '<missing>'}")
+    if is_regular and "size" not in normalized:
+        raise FtpCapabilityError("FTP MLST file metadata is missing size")
     size_text = normalized.get("size", "0")
     try:
         size = int(size_text)
@@ -346,6 +449,55 @@ def _parse_modify_time(value: str | None) -> float | None:
     except ValueError as error:
         raise FtpCapabilityError(f"invalid FTP modify fact: {value}") from error
     return parsed.timestamp()
+
+
+def _parse_unix_list_line(line: str) -> tuple[str, int, bool, bool, bool]:
+    if not line or any(character in line for character in ("\x00", "\r", "\n")):
+        raise FtpCapabilityError("legacy UNIX LIST line contains invalid control characters")
+    match = _UNIX_LIST_PATTERN.fullmatch(line)
+    if match is None:
+        raise FtpCapabilityError("legacy UNIX LIST line does not match the strict format")
+
+    entry_type = match.group("mode")[0]
+    if entry_type not in {"-", "d", "l"}:
+        raise FtpCapabilityError(f"unsupported legacy UNIX LIST entry type: {entry_type}")
+    _validate_unix_list_date(match.group("month"), match.group("day"), match.group("when"))
+
+    name = match.group("name")
+    if entry_type == "l":
+        if " -> " not in name:
+            raise FtpCapabilityError("legacy UNIX LIST symlink is missing its target")
+        name, target = name.split(" -> ", 1)
+        if not target or any(character in target for character in ("\x00", "\r", "\n")):
+            raise FtpCapabilityError("legacy UNIX LIST symlink target is invalid")
+    _validate_legacy_name(name)
+
+    size = int(match.group("size"))
+    return name, size, entry_type == "d", entry_type == "-", entry_type == "l"
+
+
+def _validate_legacy_name(name: str) -> None:
+    if not name or name != name.strip():
+        raise FtpCapabilityError("legacy UNIX LIST entry name has unsafe surrounding whitespace")
+    if any(character in name for character in ("/", "\\", "\x00", "\r", "\n")):
+        raise FtpCapabilityError("legacy UNIX LIST entry name is not a safe basename")
+
+
+def _validate_unix_list_date(month: str, day: str, when: str) -> None:
+    month_number = _UNIX_MONTHS[month]
+    day_number = int(day)
+    try:
+        if ":" in when:
+            hour, minute = (int(part) for part in when.split(":", 1))
+            datetime(2000, month_number, day_number, hour, minute)
+        else:
+            datetime(int(when), month_number, day_number)
+    except ValueError as error:
+        raise FtpCapabilityError("legacy UNIX LIST timestamp is invalid") from error
+
+
+def _join_remote(directory: str, name: str) -> str:
+    return f"/{name}" if directory == "/" else f"{directory.rstrip('/')}/{name}"
 
 
 def _commit_local_file(temporary: Path, destination: Path, *, overwrite: bool) -> None:

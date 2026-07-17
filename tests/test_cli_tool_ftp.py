@@ -10,6 +10,7 @@ from cli_tool.transfer.ftp import (
     FtpCapabilityError,
     FtpReadOnlyClient,
     _parse_mlst_response,
+    _parse_unix_list_line,
 )
 from cli_tool.transfer.sftp import TransferLimitError
 
@@ -193,7 +194,7 @@ def test_ftp_rejects_command_line_breaks_in_remote_path():
 
 def test_ftp_list_requires_mlsd():
     class NoMlsd(FakeFtp):
-        def mlsd(self, path, facts):
+        def mlsd(self, path, facts=None):
             raise ftplib.error_perm("500 unsupported")
 
     with pytest.raises(FtpCapabilityError, match="MLSD"):
@@ -256,3 +257,187 @@ def test_mlst_parser_accepts_facts_prefixed_by_reply_code():
         "size": "7",
         "modify": "20260717010000",
     }
+
+class FakeLegacyFtp(FakeFtp):
+    directory_lines = (
+        "-rw-r--r-- 1 admin admin 7 Jul 17 14:00 file.bin",
+        "drwxr-xr-x 2 admin admin 0 Jan 02 2025 folder",
+        "lrwxrwxrwx 1 admin admin 8 Jul 17 14:01 link -> file.bin",
+    )
+
+    def mlsd(self, path, facts=None):
+        raise ftplib.error_perm("500 MLSD unsupported")
+
+    def sendcmd(self, command):
+        self.commands.append(command)
+        if command.startswith("MLST "):
+            raise ftplib.error_perm("500 MLST unsupported")
+        if command.startswith("MDTM "):
+            return f"213 {self.modify}"
+        raise AssertionError(command)
+
+    def retrlines(self, command, callback):
+        self.commands.append(command)
+        requested = command[5:]
+        if requested == "/safe":
+            lines = self.directory_lines
+        else:
+            name = requested.rsplit("/", 1)[-1]
+            lines = tuple(line for line in self.directory_lines if _listed_name(line) == name)
+            if not lines:
+                raise ftplib.error_perm("550 not found")
+        for line in lines:
+            callback(line)
+
+
+def _listed_name(line: str) -> str:
+    name = line.split(maxsplit=8)[-1]
+    return name.split(" -> ", 1)[0]
+
+
+def test_legacy_listing_requires_double_opt_in():
+    with pytest.raises(ValueError, match="provided together"):
+        FtpReadOnlyClient(
+            "192.0.2.10",
+            "admin",
+            "secret",
+            protocol="ftp",
+            allow_insecure_ftp=True,
+            allow_legacy_listing=True,
+        )
+
+    with pytest.raises(ValueError, match="provided together"):
+        FtpReadOnlyClient(
+            "192.0.2.10",
+            "admin",
+            "secret",
+            protocol="ftp",
+            allow_insecure_ftp=True,
+            legacy_list_format="unix",
+        )
+
+
+def test_legacy_unix_list_stat_exists_and_download(tmp_path):
+    fake = FakeLegacyFtp()
+    client = _client(
+        fake,
+        allow_legacy_listing=True,
+        legacy_list_format="unix",
+    )
+    destination = tmp_path / "file.bin"
+
+    items = client.list_files(".")
+    info = client.stat("file.bin")
+    result = client.download("file.bin", destination)
+
+    assert [item.path for item in items] == [
+        "/safe/file.bin",
+        "/safe/folder",
+        "/safe/link",
+    ]
+    assert items[0].is_regular_file is True
+    assert items[1].is_directory is True
+    assert items[2].is_symlink is True
+    assert all(item.modified_time is None for item in items)
+    assert client.last_listing_method == "legacy_unix"
+    assert info.modified_time is not None
+    assert client.exists("missing.bin") is False
+    assert destination.read_bytes() == b"payload"
+    assert result.sha256 == hashlib.sha256(b"payload").hexdigest()
+
+
+def test_legacy_download_rejects_symlink(tmp_path):
+    client = _client(
+        FakeLegacyFtp(),
+        allow_legacy_listing=True,
+        legacy_list_format="unix",
+    )
+
+    with pytest.raises(ValueError, match="non-symlink"):
+        client.download("link", tmp_path / "link")
+
+
+def test_mlsd_without_opts_is_preferred_over_legacy_list():
+    class NoOptsMlsd(FakeFtp):
+        def mlsd(self, path, facts=None):
+            if facts is not None:
+                raise ftplib.error_perm("501 OPTS unsupported")
+            return super().mlsd(path, facts=[])
+
+        def retrlines(self, command, callback):
+            raise AssertionError("legacy LIST must not run when MLSD works")
+
+    client = _client(
+        NoOptsMlsd(),
+        allow_legacy_listing=True,
+        legacy_list_format="unix",
+    )
+
+    assert len(client.list_files(".")) == 2
+    assert client.last_listing_method == "mlsd"
+
+
+def test_legacy_fallback_does_not_hide_permission_errors():
+    class PermissionDenied(FakeFtp):
+        def mlsd(self, path, facts=None):
+            raise ftplib.error_perm("550 permission denied")
+
+        def retrlines(self, command, callback):
+            raise AssertionError("legacy LIST must not run after permission denial")
+
+    client = _client(
+        PermissionDenied(),
+        allow_legacy_listing=True,
+        legacy_list_format="unix",
+    )
+
+    with pytest.raises(ftplib.error_perm, match="permission denied"):
+        client.list_files(".")
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "total 1",
+        "prw-r--r-- 1 admin admin 0 Jul 17 14:00 pipe",
+        "-rw-r--r-- 1 admin admin 1 Jul 32 14:00 file",
+        "-rw-r--r-- 1 admin admin 1 Jul 17 25:00 file",
+        "-rw-r--r-- 1 admin admin 1 Jul 17 14:00 ../file",
+        "lrwxrwxrwx 1 admin admin 1 Jul 17 14:00 link",
+        "-rw-r--r-- 1 admin admin 1 Jul 17 14:00 trailing ",
+    ],
+)
+def test_legacy_unix_parser_fails_closed(line):
+    with pytest.raises(FtpCapabilityError):
+        _parse_unix_list_line(line)
+
+
+def test_legacy_unix_parser_accepts_spaces_and_symlinks():
+    regular = _parse_unix_list_line(
+        "-rw-r--r-- 1 admin admin 7 Jul 17 14:00 file with spaces.bin"
+    )
+    symlink = _parse_unix_list_line(
+        "lrwxrwxrwx 1 admin admin 7 Jul 17 14:00 link name -> target name"
+    )
+
+    assert regular == ("file with spaces.bin", 7, False, True, False)
+    assert symlink == ("link name", 7, False, False, True)
+
+def test_stat_does_not_infer_regular_file_from_size_without_mlst():
+    class NoMlst(FakeFtp):
+        def sendcmd(self, command):
+            if command.startswith("MLST "):
+                raise ftplib.error_perm("500 MLST unsupported")
+            return super().sendcmd(command)
+
+    with pytest.raises(FtpCapabilityError, match="MLST"):
+        _client(NoMlst()).stat("file.bin")
+
+
+def test_mlsd_regular_file_requires_size_fact():
+    class MissingSize(FakeFtp):
+        def mlsd(self, path, facts=None):
+            return iter([("file.bin", {"type": "file", "modify": self.modify})])
+
+    with pytest.raises(FtpCapabilityError, match="missing size"):
+        _client(MissingSize()).list_files(".")

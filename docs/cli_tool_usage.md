@@ -1,4 +1,4 @@
-﻿# CLI Tool 使用指南
+# CLI Tool 使用指南
 
 ## 目前狀態
 
@@ -393,6 +393,17 @@ cli_tool/safety/policy.py
 - firmware 版本對 output 欄位的影響。
 
 第一批只建議加入低風險 read-only command，例如版本查詢。若命令尚未確認，先不要建立 catalog。
+
+## Legacy FTP 安全模式
+
+FTP/FTPS 預設要求 MLSD/MLST 結構化 metadata。舊伺服器只有在 invocation 同時指定下列兩個參數時，才允許嚴格 UNIX LIST fallback：
+
+```powershell
+--allow-legacy-listing
+--legacy-list-format unix
+```
+
+fallback 只處理 FTP command unsupported；permission denied、未知格式、特殊檔案、unsafe basename 或 symlink download 仍立即失敗。工具不會只依 SIZE 推定 regular file，report 會記錄 fallback 是否啟用及實際使用的 listing/metadata method。
 
 ## 驗證命令
 
