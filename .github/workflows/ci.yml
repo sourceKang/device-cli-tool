@@ -1,0 +1,38 @@
+name: offline-tests
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+          - "3.11"
+          - "3.12"
+          - "3.13"
+          - "3.14"
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install test and build dependencies
+        run: python -m pip install --upgrade pip setuptools wheel .[test]
+      - name: Compile
+        run: python -m compileall cli_tool tools tests
+      - name: Test
+        run: python -m pytest tests -p no:cacheprovider --basetemp="$env:RUNNER_TEMP\device-cli-tool-tests"
+      - name: Build wheel
+        if: matrix.python-version == '3.14'
+        run: python -m pip wheel --no-deps --no-build-isolation . --wheel-dir "$env:RUNNER_TEMP\wheel"

@@ -4,7 +4,9 @@ import errno
 import hashlib
 import io
 import stat
+import sys
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import pytest
 
@@ -132,3 +134,93 @@ def test_sftp_download_rejects_symlink(tmp_path):
 
     with pytest.raises(ValueError, match="non-symlink"):
         client.download("link", tmp_path / "link")
+
+
+def test_sftp_download_rejects_remote_metadata_change(tmp_path):
+    class ChangingMetadataSftp(FakeSftp):
+        calls = 0
+
+        def lstat(self, path: str):
+            attributes = super().lstat(path)
+            self.calls += 1
+            if self.calls > 1:
+                attributes.st_mtime += 1
+            return attributes
+
+    destination = tmp_path / "changed.bin"
+    client = _client(ChangingMetadataSftp({"/safe/changed.bin": b"payload"}))
+
+    with pytest.raises(IOError, match="metadata changed"):
+        client.download("changed.bin", destination)
+
+    assert not destination.exists()
+    assert list(tmp_path.glob("*.part")) == []
+
+
+def test_sftp_private_key_auth_is_forwarded_to_paramiko(monkeypatch, tmp_path):
+    private_key = tmp_path / "id_test"
+    private_key.write_text("placeholder", encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    class FakeSftpSession:
+        def close(self) -> None:
+            pass
+
+    class FakeSshClient:
+        def load_system_host_keys(self) -> None:
+            pass
+
+        def load_host_keys(self, path: str) -> None:
+            pass
+
+        def set_missing_host_key_policy(self, policy) -> None:
+            pass
+
+        def connect(self, **kwargs) -> None:
+            captured.update(kwargs)
+
+        def open_sftp(self):
+            return FakeSftpSession()
+
+        def close(self) -> None:
+            pass
+
+    fake_paramiko = SimpleNamespace(
+        SSHClient=FakeSshClient,
+        RejectPolicy=lambda: object(),
+        WarningPolicy=lambda: object(),
+    )
+    monkeypatch.setitem(sys.modules, "paramiko", fake_paramiko)
+
+    client = SftpReadOnlyClient(
+        "192.0.2.10",
+        "admin",
+        private_key_path=private_key,
+        private_key_passphrase="key-secret",
+        timeout=7,
+    )
+    client.connect()
+    client.close()
+
+    assert captured["key_filename"] == str(private_key)
+    assert captured["passphrase"] == "key-secret"
+    assert "password" not in captured
+    assert captured["timeout"] == 7
+    assert captured["look_for_keys"] is False
+    assert captured["allow_agent"] is False
+
+
+def test_sftp_requires_exactly_one_auth_method(tmp_path):
+    private_key = tmp_path / "id_test"
+    private_key.write_text("placeholder", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="exactly one"):
+        SftpReadOnlyClient("192.0.2.10", "admin")
+
+    with pytest.raises(ValueError, match="exactly one"):
+        SftpReadOnlyClient(
+            "192.0.2.10",
+            "admin",
+            "secret",
+            private_key_path=private_key,
+        )

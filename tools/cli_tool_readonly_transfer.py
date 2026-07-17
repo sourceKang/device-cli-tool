@@ -20,6 +20,7 @@ from cli_tool.transfer.sftp import DEFAULT_MAX_DOWNLOAD_BYTES, SftpReadOnlyClien
 
 DEFAULT_PASSWORD_ENV = "CLI_TOOL_SFTP_PASSWORD"
 DEFAULT_REPORT_DIR = "reports/cli-tool-transfer"
+DEFAULT_TIMEOUT = 15.0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -40,6 +41,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--password-env",
         default=DEFAULT_PASSWORD_ENV,
         help="Environment variable containing the SFTP password.",
+    )
+    parser.add_argument("--private-key", help="Private key file used instead of password authentication.")
+    parser.add_argument(
+        "--private-key-passphrase-env",
+        help="Environment variable containing the private key passphrase.",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=DEFAULT_TIMEOUT,
+        help="Connect, banner and authentication timeout in seconds.",
     )
     parser.add_argument(
         "--known-hosts",
@@ -77,9 +89,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def run_transfer(args: argparse.Namespace) -> int:
     _validate_args(args)
-    password = os.environ.get(args.password_env)
-    if not password:
-        raise SystemExit(f"missing SFTP password env var: {args.password_env}")
+    password, private_key_passphrase, auth_method = _resolve_auth(args)
 
     started = time.monotonic()
     outcome: dict[str, object] = {}
@@ -90,7 +100,9 @@ def run_transfer(args: argparse.Namespace) -> int:
             port=args.port,
             username=args.username,
             password=password,
-            timeout=15.0,
+            private_key_path=args.private_key,
+            private_key_passphrase=private_key_passphrase,
+            timeout=args.timeout,
             known_hosts_path=args.known_hosts,
             allow_unknown_host_key=args.allow_unknown_host_key,
             remote_root=args.remote_root,
@@ -104,6 +116,7 @@ def run_transfer(args: argparse.Namespace) -> int:
         args,
         outcome=outcome,
         error=error,
+        auth_method=auth_method,
         duration_seconds=round(time.monotonic() - started, 3),
     )
     report_path = None if args.no_report else _write_report(report, Path(args.report_dir))
@@ -141,8 +154,12 @@ def _run_operation(client: SftpReadOnlyClient, args: argparse.Namespace) -> dict
 def _validate_args(args: argparse.Namespace) -> None:
     if not args.password_env.strip():
         raise SystemExit("--password-env must be a non-empty environment variable name")
+    if args.private_key_passphrase_env and not args.private_key:
+        raise SystemExit("--private-key-passphrase-env requires --private-key")
     if args.port < 1 or args.port > 65535:
         raise SystemExit("--port must be between 1 and 65535")
+    if args.timeout <= 0:
+        raise SystemExit("--timeout must be greater than 0")
     if args.max_download_bytes < 1:
         raise SystemExit("--max-download-bytes must be greater than 0")
     if args.operation == "download" and not args.local_path:
@@ -153,21 +170,42 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--overwrite is only valid for download")
 
 
+def _resolve_auth(args: argparse.Namespace) -> tuple[str | None, str | None, str]:
+    if args.private_key:
+        passphrase = None
+        if args.private_key_passphrase_env:
+            passphrase = os.environ.get(args.private_key_passphrase_env)
+            if passphrase is None:
+                raise SystemExit(
+                    f"missing private key passphrase env var: {args.private_key_passphrase_env}"
+                )
+        return None, passphrase, "private_key"
+
+    password = os.environ.get(args.password_env)
+    if not password:
+        raise SystemExit(f"missing SFTP password env var: {args.password_env}")
+    return password, None, "password"
+
+
 def _build_report(
     args: argparse.Namespace,
     *,
     outcome: dict[str, object],
     error: Exception | None,
+    auth_method: str,
     duration_seconds: float,
 ) -> dict[str, object]:
     include = args.include_paths
     return {
+        "schema_version": 1,
         "tool": "cli_tool_readonly_transfer",
         "timestamp": datetime.now().isoformat(timespec="seconds"),
         "duration_seconds": duration_seconds,
         "passed": error is None,
         "protocol": "sftp",
         "operation": args.operation,
+        "auth_method": auth_method,
+        "timeout_seconds": args.timeout,
         "target": identifier_reference(args.host, include_value=include),
         "username": identifier_reference(args.username, include_value=include),
         "remote_root": identifier_reference(args.remote_root, include_value=include),
