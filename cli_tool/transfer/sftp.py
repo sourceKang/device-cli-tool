@@ -26,12 +26,14 @@ class SftpReadOnlyClient:
         self,
         host: str,
         username: str,
-        password: str,
+        password: str | None = None,
         *,
         port: int = 22,
         timeout: float = 15.0,
         known_hosts_path: str | Path | None = None,
         allow_unknown_host_key: bool = False,
+        private_key_path: str | Path | None = None,
+        private_key_passphrase: str | None = None,
         remote_root: str = "/",
         max_download_bytes: int = DEFAULT_MAX_DOWNLOAD_BYTES,
         chunk_size: int = DEFAULT_CHUNK_SIZE,
@@ -40,8 +42,13 @@ class SftpReadOnlyClient:
             raise ValueError("host is required")
         if not username:
             raise ValueError("username is required")
-        if not password:
-            raise ValueError("password is required")
+        if bool(password) == bool(private_key_path):
+            raise ValueError("configure exactly one SFTP auth method: password or private_key_path")
+        if private_key_passphrase and private_key_path is None:
+            raise ValueError("private_key_passphrase requires private_key_path")
+        resolved_private_key = Path(private_key_path).expanduser() if private_key_path else None
+        if resolved_private_key is not None and not resolved_private_key.is_file():
+            raise FileNotFoundError(f"private key file does not exist: {resolved_private_key}")
         if port < 1 or port > 65535:
             raise ValueError("port must be between 1 and 65535")
         if timeout <= 0:
@@ -58,6 +65,8 @@ class SftpReadOnlyClient:
         self.timeout = timeout
         self.known_hosts_path = known_hosts_path
         self.allow_unknown_host_key = allow_unknown_host_key
+        self.private_key_path = resolved_private_key
+        self.private_key_passphrase = private_key_passphrase
         self.remote_root = resolve_remote_path(remote_root, ".")
         self.max_download_bytes = max_download_bytes
         self.chunk_size = chunk_size
@@ -86,17 +95,23 @@ class SftpReadOnlyClient:
             known_hosts_path=self.known_hosts_path,
             allow_unknown_host_key=self.allow_unknown_host_key,
         )
+        auth_kwargs: dict[str, object] = {}
+        if self.private_key_path is not None:
+            auth_kwargs["key_filename"] = str(self.private_key_path)
+            auth_kwargs["passphrase"] = self.private_key_passphrase
+        else:
+            auth_kwargs["password"] = self.password
         try:
             client.connect(
                 hostname=self.host,
                 port=self.port,
                 username=self.username,
-                password=self.password,
                 look_for_keys=False,
                 allow_agent=False,
                 timeout=self.timeout,
                 banner_timeout=self.timeout,
                 auth_timeout=self.timeout,
+                **auth_kwargs,
             )
             self._sftp = client.open_sftp()
             self._client = client
@@ -184,6 +199,9 @@ class SftpReadOnlyClient:
                 raise IOError(
                     f"SFTP download size mismatch: expected {info.size}, received {downloaded}"
                 )
+            final_info = self.stat(info.path)
+            if _file_identity(final_info) != _file_identity(info):
+                raise IOError("remote file metadata changed during SFTP download")
             _commit_local_file(temporary, destination, overwrite=overwrite)
         except Exception:
             temporary.unlink(missing_ok=True)
@@ -239,3 +257,13 @@ def _optional_float(value) -> float | None:
 
 def _is_not_found(error: OSError) -> bool:
     return getattr(error, "errno", None) == errno.ENOENT or (error.args and error.args[0] == errno.ENOENT)
+
+
+def _file_identity(info: RemoteFileInfo) -> tuple[object, ...]:
+    return (
+        info.size,
+        info.modified_time,
+        info.is_directory,
+        info.is_regular_file,
+        info.is_symlink,
+    )
