@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 import json
@@ -13,6 +13,7 @@ from cli_tool.catalog.loader import load_driver_source
 from cli_tool.reporting.redaction import redact, redact_text
 from cli_tool.transport.serial import SerialCliTransport
 from cli_tool.transport.ssh_adapter import SshCliTransport
+from cli_tool.transport.telnet import TelnetCliTransport
 from cli_tool.workflows.driver_verify import run_driver_verify
 
 
@@ -26,6 +27,8 @@ DEFAULT_SSH_CONNECT_ATTEMPTS = 3
 DEFAULT_SSH_RETRY_BACKOFF_SECONDS = 1.0
 DEFAULT_SERIAL_BAUDRATE = 115200
 DEFAULT_SERIAL_TIMEOUT = 15.0
+DEFAULT_TELNET_PORT = 23
+DEFAULT_TELNET_TIMEOUT = 15.0
 DEFAULT_REPORT_DIR = "reports/cli-tool"
 
 
@@ -50,6 +53,9 @@ class SmokeRunConfig:
     ssh_retry_backoff_seconds: float
     known_hosts_path: Path | None
     allow_unknown_host_key: bool
+    telnet_port: int
+    telnet_timeout: float
+    allow_insecure_telnet: bool
     baudrate: int
     serial_timeout: float
     report_dir: Path
@@ -65,7 +71,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         prog="device-cli-smoke",
         description="Run one read-only CLI catalog command through cli_tool transport.",
     )
-    parser.add_argument("--transport", choices=["ssh", "serial"], help="CLI transport to use; overrides node_target.cli.")
+    parser.add_argument(
+        "--transport",
+        choices=["ssh", "serial", "telnet"],
+        help="CLI transport to use; overrides node_target.cli.",
+    )
     parser.add_argument("--catalog", help="Built-in catalog name or YAML path; overrides node_target.cli.")
     parser.add_argument("--command-id", help="Read-only command id from the catalog; overrides node_target.cli.default_command.")
     parser.add_argument(
@@ -106,6 +116,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--serial-port", help="Serial console port, for example COM5.")
     parser.add_argument("--baudrate", type=int, help="Serial console baudrate.")
     parser.add_argument("--serial-timeout", type=float, help="Serial read/login timeout in seconds.")
+    parser.add_argument("--telnet-port", type=int, help="Telnet port; defaults to 23.")
+    parser.add_argument("--telnet-timeout", type=float, help="Telnet connect/login/command timeout.")
+    parser.add_argument(
+        "--allow-insecure-telnet",
+        action="store_true",
+        help=(
+            "Allow plaintext Telnet for an isolated lab. "
+            "This cannot be enabled from target YAML."
+        ),
+    )
     parser.add_argument(
         "--include-output",
         action="store_true",
@@ -172,8 +192,10 @@ def _resolve_smoke_config(args: argparse.Namespace) -> SmokeRunConfig:
     env_config, cli_config = _resolve_config_source(args)
 
     transport = _string_setting(args.transport, cli_config, "transport", DEFAULT_TRANSPORT).lower()
-    if transport not in {"ssh", "serial"}:
-        raise SystemExit("node_target.cli.transport must be 'ssh' or 'serial'")
+    if transport not in {"ssh", "serial", "telnet"}:
+        raise SystemExit("node_target.cli.transport must be 'ssh', 'serial' or 'telnet'")
+    if transport == "telnet" and not args.allow_insecure_telnet:
+        raise SystemExit("Telnet is plaintext; pass --allow-insecure-telnet for an isolated lab")
 
     catalog = Path(_string_setting(args.catalog, cli_config, "catalog", DEFAULT_CATALOG))
     command_id = _string_setting(args.command_id, cli_config, "default_command", DEFAULT_COMMAND_ID)
@@ -200,6 +222,18 @@ def _resolve_smoke_config(args: argparse.Namespace) -> SmokeRunConfig:
     known_hosts_value = args.known_hosts or _optional_string(cli_config, "known_hosts")
     known_hosts_path = Path(known_hosts_value) if known_hosts_value else None
     allow_unknown_host_key = bool(args.allow_unknown_host_key)
+    telnet_port = _positive_int(
+        args.telnet_port if args.telnet_port is not None else cli_config.get("telnet_port"),
+        "telnet_port",
+        DEFAULT_TELNET_PORT,
+    )
+    if telnet_port > 65535:
+        raise SystemExit("node_target.cli.telnet_port must be between 1 and 65535")
+    telnet_timeout = _positive_float(
+        args.telnet_timeout if args.telnet_timeout is not None else cli_config.get("telnet_timeout", timeout),
+        "telnet_timeout",
+        DEFAULT_TELNET_TIMEOUT,
+    )
     serial_timeout = _positive_float(
         args.serial_timeout if args.serial_timeout is not None else cli_config.get("serial_timeout", timeout),
         "serial_timeout",
@@ -221,6 +255,9 @@ def _resolve_smoke_config(args: argparse.Namespace) -> SmokeRunConfig:
         ssh_retry_backoff_seconds=ssh_retry_backoff_seconds,
         known_hosts_path=known_hosts_path,
         allow_unknown_host_key=allow_unknown_host_key,
+        telnet_port=telnet_port,
+        telnet_timeout=telnet_timeout,
+        allow_insecure_telnet=bool(args.allow_insecure_telnet),
         baudrate=baudrate,
         serial_timeout=serial_timeout,
         report_dir=report_dir,
@@ -245,7 +282,7 @@ def _resolve_target(args: argparse.Namespace, env_config, cli_config: dict[str, 
     missing = [name for name, value in (("node_key", node_key), ("host", host), ("username", username)) if not value]
     if missing:
         raise SystemExit(
-            f"missing required arguments with --transport ssh: "
+            f"missing required arguments with --transport {transport}: "
             f"{', '.join('--' + name.replace('_', '-') for name in missing)}"
         )
     return SmokeTarget(
@@ -254,6 +291,7 @@ def _resolve_target(args: argparse.Namespace, env_config, cli_config: dict[str, 
         username=username,
         password=password,
         auth_source=auth_source,
+        transport=transport,
     )
 
 
@@ -288,6 +326,15 @@ def _build_transport(config: SmokeRunConfig):
             password=target.password,
             baudrate=config.baudrate,
             timeout=config.serial_timeout,
+        )
+    if target.transport == "telnet":
+        return TelnetCliTransport(
+            host=target.host,
+            port=config.telnet_port,
+            username=target.username,
+            password=target.password,
+            timeout=config.telnet_timeout,
+            allow_insecure_telnet=config.allow_insecure_telnet,
         )
     return SshCliTransport(
         node_key=target.node_key,
@@ -461,12 +508,21 @@ def _build_report(
         "passed": result.passed,
         "catalog": str(config.catalog),
         "transport": target.transport,
+        "security": (
+            "insecure_plaintext"
+            if target.transport == "telnet"
+            else "encrypted"
+            if target.transport == "ssh"
+            else "local_serial"
+        ),
         "family": driver_family,
         "model": driver_model,
         "command_id": config.command_id,
         "node_key": target.node_key,
         "host": target.host,
         "serial_port": target.serial_port,
+        "telnet_port": config.telnet_port if target.transport == "telnet" else None,
+        "telnet_timeout": config.telnet_timeout if target.transport == "telnet" else None,
         "username": target.username,
         "auth_source": target.auth_source,
         "owner": args.owner,
