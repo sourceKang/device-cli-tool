@@ -7,6 +7,8 @@ Reusable multi-device CLI automation and read-only verification tool.
 - Read-only command catalogs under `configs/cli_tool/`.
 - Single-device generic `show_version` smoke workflow.
 - SSH transport based on Paramiko.
+- Strict SSH host-key verification by default, with optional explicit `known_hosts`.
+- Root-bounded SFTP read-only list/stat/exists/download operations.
 - Prompt-aware SSH and serial command completion with a bounded timeout.
 - SSH connection retry for transient failures, with exponential backoff and no authentication retry.
 - Serial console transport based on pySerial.
@@ -25,14 +27,15 @@ After the repository is published, install it into any project's virtual environ
 ```powershell
 python -m pip install "device-cli-tool @ git+https://github.com/sourceKang/device-cli-tool.git@main"
 device-cli-smoke --help
+device-cli-transfer --help
 ```
 
-See `docs/integration.md` for portable target config and optional consuming-project integration.
+See `docs/integration.md` for consuming-project integration and `docs/file_transfer.md` for SFTP safety and usage.
 
 ## Offline validation
 
 ```powershell
-python -m compileall cli_tool tools\cli_tool_readonly_smoke.py
+python -m compileall cli_tool tools
 python -m pytest tests
 ```
 
@@ -50,6 +53,8 @@ Optional `config_loader` integration mode:
 ```powershell
 device-cli-smoke --env-node node1 --auth-profile default
 ```
+
+Unknown SSH host keys are rejected by default. Use `--known-hosts` after verifying the device fingerprint through a trusted channel. `--allow-unknown-host-key` is an explicit troubleshooting escape hatch and should never be used in CI.
 
 The consuming project may define node-specific CLI settings under its target config:
 
@@ -82,3 +87,18 @@ Portable config mode for projects without a compatible `config_loader`:
 ```powershell
 device-cli-smoke --target-config configs/device_cli_targets.yaml --target lab-ies
 ```
+
+## Read-only SFTP
+
+```powershell
+$env:CLI_TOOL_SFTP_PASSWORD="your-password"
+device-cli-transfer download `
+  --host 192.0.2.10 `
+  --username admin `
+  --known-hosts "$HOME\.ssh\known_hosts" `
+  --remote-root /var/log `
+  --remote-path messages `
+  --local-path artifacts\messages.log
+```
+
+SFTP is a separate file-transfer API, not an interactive CLI transport. It does not support upload, delete, rename, recursive download, FTP, or Telnet. Paths and target identifiers are hashed in stdout and reports unless `--include-paths` is explicit.

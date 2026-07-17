@@ -17,6 +17,7 @@ from cli_tool.transport.readiness import (
     normalize_stream_text,
     strip_command_envelope,
 )
+from cli_tool.transport.ssh_host_keys import configure_ssh_host_keys
 
 
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -87,6 +88,8 @@ class SshCliClient:
         timeout: float = 15,
         connect_attempts: int = 3,
         retry_backoff_seconds: float = 1.0,
+        known_hosts_path: str | Path | None = None,
+        allow_unknown_host_key: bool = False,
     ) -> None:
         self.host = host
         self.username = username
@@ -94,6 +97,8 @@ class SshCliClient:
         self.timeout = timeout
         self.connect_attempts = connect_attempts
         self.retry_backoff_seconds = retry_backoff_seconds
+        self.known_hosts_path = known_hosts_path
+        self.allow_unknown_host_key = allow_unknown_host_key
 
     def run_commands(self, commands: list[str]) -> list[CliCommandResult]:
         session = SshCliSession(
@@ -103,6 +108,8 @@ class SshCliClient:
             timeout=self.timeout,
             connect_attempts=self.connect_attempts,
             retry_backoff_seconds=self.retry_backoff_seconds,
+            known_hosts_path=self.known_hosts_path,
+            allow_unknown_host_key=self.allow_unknown_host_key,
         )
         try:
             session.connect()
@@ -192,6 +199,8 @@ class SshCliSession:
         timeout: float = 15,
         connect_attempts: int = 3,
         retry_backoff_seconds: float = 1.0,
+        known_hosts_path: str | Path | None = None,
+        allow_unknown_host_key: bool = False,
     ) -> None:
         if connect_attempts < 1:
             raise ValueError("connect_attempts must be at least 1")
@@ -203,6 +212,8 @@ class SshCliSession:
         self.timeout = timeout
         self.connect_attempts = connect_attempts
         self.retry_backoff_seconds = retry_backoff_seconds
+        self.known_hosts_path = known_hosts_path
+        self.allow_unknown_host_key = allow_unknown_host_key
         self.connect_attempts_used = 0
         self.client = None
         self.channel = None
@@ -222,7 +233,12 @@ class SshCliSession:
         for attempt in range(1, self.connect_attempts + 1):
             self.connect_attempts_used = attempt
             self.client = paramiko.SSHClient()
-            self.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            configure_ssh_host_keys(
+                self.client,
+                paramiko,
+                known_hosts_path=self.known_hosts_path,
+                allow_unknown_host_key=self.allow_unknown_host_key,
+            )
             try:
                 started = time.monotonic()
                 try:
@@ -428,6 +444,8 @@ class SshSessionPool:
         ssh_timeout: float = 15,
         connect_attempts: int = 3,
         retry_backoff_seconds: float = 1.0,
+        known_hosts_path: str | Path | None = None,
+        allow_unknown_host_key: bool = False,
         token_directory: Path | None = None,
         reuse_sessions: bool = True,
     ) -> None:
@@ -443,6 +461,8 @@ class SshSessionPool:
         self.ssh_timeout = ssh_timeout
         self.connect_attempts = connect_attempts
         self.retry_backoff_seconds = retry_backoff_seconds
+        self.known_hosts_path = known_hosts_path
+        self.allow_unknown_host_key = allow_unknown_host_key
         self.reuse_sessions = reuse_sessions
         self.token_directory = token_directory or default_token_directory()
         self.semaphore = FileTokenSemaphore(
@@ -495,6 +515,8 @@ class SshSessionPool:
             timeout=self.ssh_timeout,
             connect_attempts=self.connect_attempts,
             retry_backoff_seconds=self.retry_backoff_seconds,
+            known_hosts_path=self.known_hosts_path,
+            allow_unknown_host_key=self.allow_unknown_host_key,
         )
         timing = SshTiming(
             node_key=self.node_key,
@@ -538,7 +560,7 @@ class SshSessionPool:
             self.semaphore.release(token_path)
 
 
-_POOLS: dict[tuple[str, str, str, int, bool, float, int, float], SshSessionPool] = {}
+_POOLS: dict[tuple[object, ...], SshSessionPool] = {}
 _POOLS_LOCK = threading.Lock()
 
 
@@ -553,6 +575,8 @@ def ssh_session_pool(
     ssh_timeout: float = 15,
     connect_attempts: int = 3,
     retry_backoff_seconds: float = 1.0,
+    known_hosts_path: str | Path | None = None,
+    allow_unknown_host_key: bool = False,
     reuse_sessions: bool | None = None,
 ) -> SshSessionPool:
     resolved_max_sessions = max_sessions or int(os.environ.get("NEOX_SSH_POOL_SIZE", "2"))
@@ -566,6 +590,8 @@ def ssh_session_pool(
         ssh_timeout,
         connect_attempts,
         retry_backoff_seconds,
+        str(Path(known_hosts_path).expanduser()) if known_hosts_path is not None else None,
+        allow_unknown_host_key,
     )
     with _POOLS_LOCK:
         pool = _POOLS.get(pool_key)
@@ -581,6 +607,8 @@ def ssh_session_pool(
                 ssh_timeout=ssh_timeout,
                 connect_attempts=connect_attempts,
                 retry_backoff_seconds=retry_backoff_seconds,
+                known_hosts_path=known_hosts_path,
+                allow_unknown_host_key=allow_unknown_host_key,
                 reuse_sessions=resolved_reuse_sessions,
             )
             _POOLS[pool_key] = pool
