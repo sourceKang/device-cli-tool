@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.0
+
+- 新增 `device-cli-xpon-plan`，產生 NeoX xPON register-method A 的唯讀 dry-run HTML/JSON。
+- Node、IP、Slot、Port 必須精確確認，mutation sequence 採固定 allowlist。
+- `--run-mutating` 在原始狀態讀取與 rollback 尚未驗證前固定拒絕，絕不連線或修改設備。
+- 新增離線安全測試，包含 command injection、目標錯誤、live lock 與敏感資料檢查。
+
 ## 0.1.1
 
 - SSH 在送出 command 前遇到暫時性連線或 handshake 錯誤時，支援可設定的指數退避重試。

@@ -19,6 +19,7 @@ Reusable multi-device CLI automation and read-only verification tool.
 - Empty CLI output always fails verification, including commands without expected tokens.
 - Fail-closed `show lc st` fixed-width table parser and JSON-safe line-card snapshot workflow.
 - Optional `--env-node` integration for SSH or serial settings from a consuming project's `node_target.cli` config.
+- Locked, credential-free NeoX xPON remediation dry-run with exact target confirmation and command allowlisting.
 
 The current operational target is one device per CLI invocation. Multi-device concurrent execution is intentionally out of scope for now.
 
@@ -30,9 +31,11 @@ After the repository is published, install it into any project's virtual environ
 python -m pip install "device-cli-tool @ git+https://github.com/sourceKang/device-cli-tool.git@main"
 device-cli-smoke --help
 device-cli-transfer --help
+device-cli-xpon-plan --help
 ```
 
 See `docs/integration.md` for consuming-project integration and `docs/file_transfer.md` for SFTP safety and usage.
+See docs/xpon_remediation.md for the plan-only xPON remediation safety boundary.
 
 ## Offline validation
 

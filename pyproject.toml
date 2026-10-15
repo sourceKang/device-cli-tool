@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "device-cli-tool"
-version = "0.5.1"
+version = "0.6.0"
 description = "Reusable multi-device CLI automation and read-only verification tool"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -22,6 +22,7 @@ test = [
 [project.scripts]
 device-cli-smoke = "tools.cli_tool_readonly_smoke:main"
 device-cli-transfer = "tools.cli_tool_readonly_transfer:main"
+device-cli-xpon-plan = "tools.cli_tool_xpon_plan:main"
 
 [tool.pytest.ini_options]
 addopts = "-vv --basetemp=.pytest-tmp"
