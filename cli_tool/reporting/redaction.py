@@ -19,6 +19,26 @@ SERIAL_FIELD = re.compile(r"(?im)^(\s*(?:serial(?:\s+number)?|chassis\s+serial)\
 HOSTNAME_FIELD = re.compile(r"(?im)^(\s*hostname\s*:\s*).+$")
 CONTACT_FIELD = re.compile(r"(?im)^(\s*contact\s*:\s*).+$")
 LOCATION_FIELD = re.compile(r"(?im)^(\s*location\s*:\s*).+$")
+XML_SENSITIVE_TAG_NAMES = (
+    "password",
+    "hashed-password",
+    "community",
+    "snmp-community",
+    "pre-shared-key",
+    "psk",
+    "secret",
+    "shared-secret",
+    "token",
+    "public-key",
+    "private-key",
+    "cleartext-private-key",
+    "encrypted-private-key",
+    "cleartext-symmetric-key",
+    "encrypted-symmetric-key",
+)
+XML_SENSITIVE_TAG = re.compile(
+    r"(?is)<((?:[\w.-]+:)?(?:" + "|".join(XML_SENSITIVE_TAG_NAMES) + r"))(\s[^>]*)?>.*?</\1>"
+)
 
 
 def redact(value: Any) -> Any:
@@ -42,7 +62,8 @@ def redact_text(value: str) -> str:
     value = SERIAL_FIELD.sub(r"\1***REDACTED***", value)
     value = HOSTNAME_FIELD.sub(r"\1***REDACTED***", value)
     value = CONTACT_FIELD.sub(r"\1***REDACTED***", value)
-    return LOCATION_FIELD.sub(r"\1***REDACTED***", value)
+    value = LOCATION_FIELD.sub(r"\1***REDACTED***", value)
+    return XML_SENSITIVE_TAG.sub(r"<\1\2>***REDACTED***</\1>", value)
 
 
 def _is_sensitive_key(key: str) -> bool:

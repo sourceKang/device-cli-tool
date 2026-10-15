@@ -20,6 +20,7 @@ Reusable multi-device CLI automation and read-only verification tool.
 - Fail-closed `show lc st` fixed-width table parser and JSON-safe line-card snapshot workflow.
 - Optional `--env-node` integration for SSH or serial settings from a consuming project's `node_target.cli` config.
 - Locked, credential-free NeoX xPON remediation dry-run with exact target confirmation and command allowlisting.
+- Optional NETCONF connection test, read-only `get`/`get-config`, and opt-in `edit-config` (candidate + validate + confirmed-commit, auto-reverting unless finalized), verified against a real NeoX NXC400 with pinned host-key verification.
 
 The current operational target is one device per CLI invocation. Multi-device concurrent execution is intentionally out of scope for now.
 
@@ -34,8 +35,16 @@ device-cli-transfer --help
 device-cli-xpon-plan --help
 ```
 
+NETCONF support is an optional extra:
+
+```powershell
+python -m pip install "device-cli-tool[netconf] @ git+https://github.com/sourceKang/device-cli-tool.git@main"
+device-cli-netconf-test --help
+```
+
 See `docs/integration.md` for consuming-project integration and `docs/file_transfer.md` for SFTP safety and usage.
 See docs/xpon_remediation.md for the plan-only xPON remediation safety boundary.
+See docs/netconf.md for the NETCONF scope, host-key pinning, and how `edit-config` stays a dry-run preview unless `--run-mutating` is explicit.
 
 ## Offline validation
 
@@ -115,3 +124,13 @@ Telnet is available only with the explicit `--allow-insecure-telnet` flag. It re
 ## FTPS and FTP
 
 The `device-cli-transfer` command supports verified Explicit FTPS, verified Implicit FTPS, and plaintext FTP with the mandatory `--allow-insecure-ftp` flag. Servers without MLSD/MLST require both `--allow-legacy-listing` and `--legacy-list-format unix`; no fallback is implicit. FTPS protects the control and data channels, and certificate verification is strict by default. See `docs/ftp_ftps.md`.
+
+## NETCONF
+
+```powershell
+$env:CLI_TOOL_NETCONF_PASSWORD="your-password"
+device-cli-netconf-test connect --host 192.0.2.10 --username admin --host-key-fingerprint "SHA256:..."
+device-cli-netconf-test get-config --host 192.0.2.10 --username admin --datastore running --include-output --host-key-fingerprint "SHA256:..."
+```
+
+`connect`, `get`, and `get-config` are read-only, connect live, and have been verified against a real NeoX NXC400. Host-key verification is a pinned SHA256 fingerprint (see `docs/netconf.md` for why `ncclient`'s own `hostkey_verify` is unsafe for an RSA-keyed server). `edit-config` prints a dry-run plan and never connects unless `--run-mutating` is explicit; live execution always targets `candidate` (never `running`) behind `validate` + confirmed-commit, and defaults to auto-reverting unless `--finalize-commit` is explicit. Requires the optional `netconf` extra (`ncclient`). See `docs/netconf.md`.
