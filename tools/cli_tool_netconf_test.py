@@ -176,6 +176,8 @@ def _validate_args(args: argparse.Namespace) -> None:
             raise SystemExit(
                 f"--confirm-timeout-seconds must be between {MIN_CONFIRM_TIMEOUT:g} and {MAX_CONFIRM_TIMEOUT:g}"
             )
+        if args.confirm_timeout_seconds is not None and not args.confirm_timeout_seconds.is_integer():
+            raise SystemExit("--confirm-timeout-seconds must be a whole number of seconds")
     elif not args.username:
         raise SystemExit("--username is required")
 

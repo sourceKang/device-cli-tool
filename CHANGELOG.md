@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.1
+
+- 修正:`execute_confirmed_commit()` 把 `confirm_timeout` 以 `int` 傳給 ncclient,lxml 無法序列化(`TypeError`),所以 0.7.0 每次實機 commit 都會失敗(fail-safe:`discard-changes`+`unlock`)。現改傳整數秒字串;小於 1 秒或非整數秒直接拒絕,不再默默截斷。CLI `--confirm-timeout-seconds` 也只接受整數秒。新增以真實 ncclient `Commit` RPC XML 驗證的離線回歸測試。
+- 修正:pinned host-key fingerprint 改在 SSH key exchange 之後、密碼認證之前檢查(ncclient `SSHSession._auth()` pre-auth hook),不吻合時密碼不會送出;仍維持 `hostkey_verify=False` 以保留 rsa-sha2 協商。
+- 新增 `execute_confirmed_commit(persist=...)` 與 `confirm_persisted_commit()`/`cancel_persisted_commit()`(需 `:confirmed-commit:1.1`),讓 confirmed commit 跨 session 存活到 timeout,供 CLI/SNMP/Web 跨介面驗證;文件說明未 finalize 且未 persist 時,變更在呼叫結束關閉 session 時即還原。
+
 ## 0.7.0
 
 - 新增 `device-cli-netconf-test`(optional `netconf` extra,依賴 `ncclient`),支援 NETCONF `connect` 連線測試與唯讀 `get`/`get-config`,已對實機 NeoX NXC400 驗證。

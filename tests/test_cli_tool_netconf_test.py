@@ -270,6 +270,35 @@ def test_edit_config_run_mutating_requires_username(tmp_path):
         )
 
 
+def test_edit_config_confirm_timeout_must_be_whole_seconds(tmp_path):
+    config_file = tmp_path / "edit.xml"
+    config_file.write_text("<config/>", encoding="utf-8")
+
+    with pytest.raises(SystemExit, match="whole number of seconds"):
+        run(
+            [
+                "edit-config",
+                "--host",
+                "192.0.2.3",
+                "--username",
+                "admin",
+                "--node-key",
+                "NODE1",
+                "--confirm-node",
+                "NODE1",
+                "--confirm-host",
+                "192.0.2.3",
+                "--edit-config-file",
+                str(config_file),
+                "--run-mutating",
+                "--confirm-timeout-seconds",
+                "7.5",
+                "--report-dir",
+                str(tmp_path),
+            ]
+        )
+
+
 def test_mutation_only_flags_require_run_mutating(tmp_path):
     config_file = tmp_path / "edit.xml"
     config_file.write_text("<config/>", encoding="utf-8")
